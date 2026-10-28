@@ -1,0 +1,23 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Ashby-like application</title></head>
+<body>
+<form onsubmit="return false">
+  <div class="_fieldEntry_a1"><label class="_label_b2" for="_systemfield_name">Name</label><input id="_systemfield_name" name="_systemfield_name" type="text" required></div>
+  <div class="_fieldEntry_a1">
+    <label class="_label_b2">Are you willing to relocate for this role?</label>
+    <div class="_yesno_c3">
+      <button type="button" aria-pressed="false" class="_option_d4">Yes</button>
+      <button type="button" aria-pressed="false" class="_option_d4">No</button>
+    </div>
+  </div>
+</form>
+<script>
+  window.__relocate = null;
+  // like Ashby: state changes only on a real click, not on attribute edits
+  document.querySelectorAll('._yesno_c3 button').forEach((b) => b.addEventListener('click', () => {
+    document.querySelectorAll('._yesno_c3 button').forEach((x) => x.setAttribute('aria-pressed', 'false'));
+    b.setAttribute('aria-pressed', 'true');
+    window.__relocate = b.textContent.trim();
+  }));
+</script>
+</body></html>

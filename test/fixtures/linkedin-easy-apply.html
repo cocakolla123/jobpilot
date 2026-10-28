@@ -1,0 +1,75 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Frontend Engineer | Acme</title>
+<style>[role=dialog]{border:1px solid #999;padding:12px;margin:12px;max-width:520px}</style></head>
+<body>
+<main>
+  <h1>Frontend Engineer</h1>
+  <div>Acme · Austin, TX</div>
+  <button id="easy" class="jobs-apply-button">Easy Apply</button>
+</main>
+<script>
+  const unknown = new URLSearchParams(location.search).has('unknown');
+  const state = {};
+  window.__sent = null;
+  window.__saved = false;
+  let step = 0, dlg = null;
+
+  const STEPS = [
+    () => `<h3>Contact info</h3>
+      <div class="fb-dash-form-element"><label for="cc">Phone country code</label>
+        <select id="cc"><option>Select an option</option><option selected>United States (+1)</option><option>India (+91)</option></select></div>
+      <div class="fb-dash-form-element"><label for="ph">Mobile phone number</label><input id="ph" type="text" required></div>
+      <button aria-label="Continue to next step">Next</button>`,
+    () => `<h3>Resume</h3>
+      <div class="jobs-document-upload-redesign-card__container"><label><input type="radio" name="res" value="Old_Resume.pdf" checked> Old_Resume.pdf</label></div>
+      <div class="jobs-document-upload-redesign-card__container"><label><input type="radio" name="res" value="Jane_Resume.pdf"> Jane_Resume.pdf</label></div>
+      <button aria-label="Continue to next step">Next</button>`,
+    () => `<h3>Additional questions</h3>
+      <div class="fb-dash-form-element"><label for="yrs">How many years of work experience do you have with React?</label><input id="yrs" type="text" required></div>
+      <div class="fb-dash-form-element"><label for="k8s">Do you have experience with Kubernetes?</label>
+        <select id="k8s" required><option>Select an option</option><option>Yes</option><option>No</option></select></div>
+      ${unknown ? `<div class="fb-dash-form-element"><label for="fav">What is your favorite framework and why?</label><input id="fav" type="text" required></div>` : ''}
+      <button aria-label="Review your application">Review</button>`,
+    () => `<h3>Review your application</h3>
+      <p>Check your answers before you send.</p>
+      <input type="checkbox" id="follow-company-checkbox" checked><label for="follow-company-checkbox">Follow Acme to stay up to date</label>
+      <button aria-label="Submit application">Submit application</button>`,
+  ];
+
+  function collect() {
+    const v = (id) => document.getElementById(id)?.value;
+    if (step === 0) state.phone = v('ph');
+    if (step === 1) state.resume = document.querySelector('input[name=res]:checked')?.value;
+    if (step === 2) { state.years = v('yrs'); state.k8s = v('k8s'); state.fav = v('fav'); }
+    if (step === 3) state.follow = document.getElementById('follow-company-checkbox').checked;
+  }
+
+  function render() {
+    dlg.innerHTML = `<button aria-label="Dismiss">×</button>` + STEPS[step]();
+    dlg.querySelector('[aria-label=Dismiss]').onclick = () => {
+      dlg.innerHTML = `<p>Save this application?</p><button id="save">Save</button><button id="discard">Discard</button>`;
+      dlg.querySelector('#save').onclick = () => { window.__saved = true; dlg.remove(); };
+      dlg.querySelector('#discard').onclick = () => dlg.remove();
+    };
+    const btn = dlg.querySelector('button:last-of-type');
+    btn.onclick = () => {
+      collect();
+      if (step === 3) {
+        window.__sent = { ...state };
+        dlg.innerHTML = `<p>Your application was sent to Acme</p><button>Done</button>`;
+        dlg.querySelector('button').onclick = () => dlg.remove();
+        return;
+      }
+      step += 1; render();
+    };
+  }
+
+  document.getElementById('easy').onclick = () => {
+    dlg = document.createElement('div');
+    dlg.setAttribute('role', 'dialog');
+    dlg.setAttribute('aria-label', 'Apply to Acme');
+    document.body.appendChild(dlg);
+    step = 0; render();
+  };
+</script>
+</body></html>

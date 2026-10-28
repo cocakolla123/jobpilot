@@ -1,0 +1,14 @@
+[
+  {
+    "q": "Consent and acknowledgement boxes (privacy policy, I certify my answers are true)",
+    "pattern": "^i (have read|agree|acknowledge|consent|certify|understand|confirm|attest)|privacy (policy|notice)|terms (of|and) (use|service|conditions)",
+    "answer": "Yes",
+    "type": "check"
+  },
+  {
+    "q": "Skip this optional question instead of answering it",
+    "pattern": "^anything else you would like (to share|us to know)",
+    "answer": "",
+    "type": "skip"
+  }
+]

@@ -1,0 +1,30 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Profile | Indeed</title></head><body><main>
+<div role="tablist"><button role="tab" aria-selected="true">Resume</button><button role="tab">Preferences</button></div>
+<div class="card" id="built"><button aria-label="Preview resume">Indeed Resume July 13</button>
+  <button aria-label="Open resume options" aria-controls="m1">⋯</button>
+  <ul role="listbox" id="m1" hidden><li role="option">Edit</li><li role="option">Download</li><li role="option">Delete</li></ul></div>
+<div class="card" id="filecard"></div>
+<input type="file" id="replace" hidden>
+<div id="confirm"></div>
+</main>
+<script>
+  // like Indeed: one uploaded file, swapped with its menu's "Replace file"
+  let current = sessionStorage.getItem('current') || 'Jane_Doe_Resume_FDE.pdf';
+  const draw = () => {
+    document.getElementById('filecard').innerHTML = `<button aria-label="Preview resume ${current}"></button><span>${current}</span>
+      <button aria-label="Open resume options" id="fileopts">⋯</button>
+      <ul role="listbox" id="m2" hidden><li role="option">Edit</li><li role="option">Download</li><li role="option">Delete</li><li role="option" id="rep">Replace file</li></ul>`;
+    document.getElementById('fileopts').onclick = () => { document.getElementById('m2').hidden = false; };
+    // like Indeed: confirm first, then the file picker
+    document.getElementById('rep').onclick = () => {
+      document.getElementById('m2').hidden = true;
+      const c = document.getElementById('confirm');
+      c.innerHTML = '<div role="dialog" aria-modal="true">Replace your resume? This will delete your current resume. <button id="yes">Replace resume</button><button id="no">Cancel</button></div>';
+      document.getElementById('yes').onclick = () => { c.innerHTML = ''; document.getElementById('replace').click(); };
+      document.getElementById('no').onclick = () => { c.innerHTML = ''; };
+    };
+  };
+  document.querySelector('#built [aria-label="Open resume options"]').onclick = () => { document.getElementById('m1').hidden = false; };
+  document.getElementById('replace').onchange = (e) => { const f = e.target.files[0].name; setTimeout(() => { current = f; sessionStorage.setItem('current', f); draw(); }, 700); };
+  draw();
+</script></body></html>

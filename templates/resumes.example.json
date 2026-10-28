@@ -1,0 +1,7 @@
+{
+  "_help": "Optional. JobPilot reads each resume's role from its file name (Resume_Frontend.pdf -> frontend). Set tags here to override, add keywords that should pull jobs toward a resume, and pick the default used when nothing fits better. Tags: swe, frontend, backend, fullstack, mobile, ml, ai, data, devops, security, fde, quant, annotation.",
+  "default": "",
+  "resumes": {
+    "Example_Resume_Frontend.pdf": { "tags": ["frontend", "fullstack"], "keywords": ["react", "typescript"] }
+  }
+}

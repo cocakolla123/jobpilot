@@ -1,0 +1,21 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Documents | Handshake</title></head><body><main>
+<h1>Documents</h1>
+<a href="/docs/new">Upload new document</a>
+<table><thead><tr><th>Name</th><th>Type</th><th>Employer Visibility</th><th>Category</th><th>Status</th><th>Upload date</th></tr></thead><tbody id="body"></tbody></table>
+<select id="per"><option>25</option><option>50</option><option>100</option></select>
+<button aria-label="next page" id="next">&gt;</button>
+</main>
+<script>
+  // like Handshake: unsorted, 25 per page, names that don't always end in .pdf
+  const added = JSON.parse(sessionStorage.getItem('added') || '[]');
+  const docs = [...[{"name": "Old resume 1.pdf", "cat": "Resume", "date": "January 25, 2023"}, {"name": "Old resume 2.pdf", "cat": "Resume", "date": "February 14, 2023"}, {"name": "Old resume 3.pdf", "cat": "Resume", "date": "March 6, 2023"}, {"name": "Transcript (1).pdf", "cat": "Transcript", "date": "February 8, 2024"}, {"name": "Old resume 4.pdf", "cat": "Resume", "date": "March 26, 2023"}, {"name": "Old resume 5.pdf", "cat": "Resume", "date": "April 15, 2023"}, {"name": "Old resume 6.pdf", "cat": "Resume", "date": "May 5, 2023"}, {"name": "Old resume 7.pdf", "cat": "Resume", "date": "May 25, 2023"}, {"name": "Old resume 8.pdf", "cat": "Resume", "date": "June 14, 2023"}, {"name": "FDE_Main", "cat": "Resume", "date": "September 17, 2026"}, {"name": "Old resume 9.pdf", "cat": "Resume", "date": "July 4, 2023"}, {"name": "Old resume 10.pdf", "cat": "Resume", "date": "July 24, 2023"}, {"name": "Jane_Doe_Resume_FDE.pdf (3)", "cat": "Resume", "date": "October 1, 2026"}, {"name": "Old resume 11.pdf", "cat": "Resume", "date": "August 13, 2023"}, {"name": "Old resume 12.pdf", "cat": "Resume", "date": "September 2, 2023"}, {"name": "Old resume 13.pdf", "cat": "Resume", "date": "September 22, 2023"}, {"name": "Old resume 14.pdf", "cat": "Resume", "date": "October 12, 2023"}, {"name": "Old resume 15.pdf", "cat": "Resume", "date": "November 1, 2023"}, {"name": "Old resume 16.pdf", "cat": "Resume", "date": "November 21, 2023"}, {"name": "Transcript 2.pdf (1)", "cat": "Transcript", "date": "July 20, 2026"}, {"name": "Old resume 17.pdf", "cat": "Resume", "date": "December 11, 2023"}, {"name": "Old resume 18.pdf", "cat": "Resume", "date": "December 31, 2023"}, {"name": "Old resume 19.pdf", "cat": "Resume", "date": "January 20, 2024"}, {"name": "Old resume 20.pdf", "cat": "Resume", "date": "February 9, 2024"}, {"name": "Old resume 21.pdf", "cat": "Resume", "date": "February 29, 2024"}, {"name": "Old resume 22.pdf", "cat": "Resume", "date": "March 20, 2024"}, {"name": "Old resume 23.pdf", "cat": "Resume", "date": "April 9, 2024"}, {"name": "Old resume 24.pdf", "cat": "Resume", "date": "April 29, 2024"}, {"name": "Old resume 25.pdf", "cat": "Resume", "date": "May 19, 2024"}, {"name": "Old resume 26.pdf", "cat": "Resume", "date": "June 8, 2024"}], ...added];
+  let per = 25, pageNo = 0;
+  const draw = () => {
+    const start = pageNo * per, slice = docs.slice(start, start + per);
+    document.getElementById('body').innerHTML = slice.map((d) => `<tr><td>${d.name}</td><td>PDF</td><td>Not visible</td><td>${d.cat}</td><td>Ready</td><td>${d.date}</td></tr>`).join('');
+    document.getElementById('next').disabled = start + per >= docs.length;
+  };
+  document.getElementById('per').onchange = (e) => { per = +e.target.value; pageNo = 0; draw(); };
+  document.getElementById('next').onclick = () => { pageNo++; draw(); };
+  draw();
+</script></body></html>

@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">
+  <title>JobPilot</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%235b50f0'/%3E%3Cpath d='M24.5 7.5 14 18M24.5 7.5 18 25l-4-7-7-4z' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="app" id="app">
+    <header class="topbar">
+      <a class="brand" href="#setup" aria-label="JobPilot home">
+        <span class="brand-mark" id="brandMark" aria-hidden="true"></span>
+        <span class="brand-name">JobPilot</span>
+      </a>
+
+      <div class="status-chip is-idle" id="statusChip" role="status" aria-live="polite">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span class="status-label" id="statusLabel">Starting</span>
+        <span class="status-count" id="statusCount" hidden></span>
+        <span class="status-current" id="statusCurrent"></span>
+        <span class="status-progress" id="statusProgress" aria-hidden="true"></span>
+      </div>
+
+      <div class="topbar-spacer"></div>
+
+      <button type="button" class="submit-flag" id="submitFlag" aria-describedby="submitFlagSub">
+        <span class="flag-dot" aria-hidden="true"></span>
+        <strong id="submitFlagText">Submit OFF</strong>
+        <span class="flag-sub" id="submitFlagSub">fills forms, does not send</span>
+      </button>
+
+      <div class="topbar-actions">
+        <button type="button" class="btn" id="btnSearch"><span>Search &amp; save</span></button>
+        <button type="button" class="btn btn-primary" id="btnApply"><span>Apply to saved jobs</span></button>
+        <button type="button" class="btn btn-danger" id="btnStop" hidden><span>Stop</span></button>
+      </div>
+    </header>
+
+    <nav class="sidebar" id="sidebar" aria-label="Sections"></nav>
+
+    <main class="main" id="main">
+      <div class="offline-banner" id="offline" role="alert" hidden></div>
+      <div class="view" id="view" tabindex="-1"></div>
+
+      <section class="logpanel" id="logpanel" aria-label="Activity log">
+        <div class="log-head">
+          <button type="button" class="log-toggle" id="logToggle" aria-expanded="false" aria-controls="logBody">
+            <span class="log-title" id="logTitle">Activity</span>
+            <span class="log-preview" id="logPreview">Nothing has happened yet.</span>
+          </button>
+          <span class="log-counts" id="logCounts"></span>
+          <button type="button" class="btn btn-ghost btn-sm" id="logClear" hidden>Clear</button>
+          <button type="button" class="icon-btn" id="logChev" aria-label="Show or hide the activity log" aria-controls="logBody"></button>
+        </div>
+        <div class="log-body" id="logBody" role="log" aria-live="off" hidden></div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+  <dialog class="dialog" id="dialog"></dialog>
+  <noscript><p class="noscript">JobPilot needs JavaScript turned on.</p></noscript>
+</body>
+</html>

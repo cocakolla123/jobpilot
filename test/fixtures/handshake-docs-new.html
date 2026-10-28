@@ -1,0 +1,28 @@
+<!doctype html><html><head><meta charset="utf-8"><title>New document | Handshake</title></head><body><main>
+<form id="f">
+  <label for="file">Document file</label><input id="file" name="file" type="file"> File size should be less than 1 MB
+  <label for="document-name">Name</label><input id="document-name" name="name" type="text">
+  <span>Document Type</span>
+  <div role="combobox" aria-haspopup="listbox" id="type" tabindex="0">Resume</div>
+  <ul role="listbox" id="opts" hidden><li role="option">Resume</li><li role="option">Cover Letter</li><li role="option">Transcript</li><li role="option">Other Document</li></ul>
+  <select id="document-document-type-id" name="documentTypeId" hidden><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="5">5</option></select>
+  <input type="checkbox" id="document-public" name="public"><label for="document-public">Visible to employers</label>
+  <textarea name="description"></textarea>
+  <button type="button" onclick="history.back()">Cancel</button>
+  <button type="submit">Save</button>
+</form></main>
+<script>
+  // like Handshake: the name fills in from the file, type defaults to Resume, Save goes back to the list
+  document.getElementById('file').onchange = (e) => { document.getElementById('document-name').value = e.target.files[0].name; };
+  document.getElementById('type').onclick = () => { document.getElementById('opts').hidden = false; };
+  document.querySelectorAll('[role=option]').forEach((o) => o.onclick = () => { document.getElementById('type').textContent = o.textContent; document.getElementById('opts').hidden = true; });
+  document.getElementById('f').onsubmit = (e) => {
+    e.preventDefault();
+    if (!document.getElementById('file').files.length) return;
+    const added = JSON.parse(sessionStorage.getItem('added') || '[]');
+    const date = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+    added.unshift({ name: document.getElementById('document-name').value, cat: document.getElementById('type').textContent, date, pub: document.getElementById('document-public').checked });
+    sessionStorage.setItem('added', JSON.stringify(added));
+    location.href = '/docs';
+  };
+</script></body></html>

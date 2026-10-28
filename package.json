@@ -1,0 +1,24 @@
+{
+  "name": "jobpilot",
+  "version": "0.1.0",
+  "description": "Search LinkedIn, Handshake and Indeed, save jobs, pick the right resume for each one without AI, and apply with Easy Apply, Handshake Quick Apply and Lever/Ashby/Greenhouse forms, all from a small local dashboard.",
+  "type": "module",
+  "bin": {
+    "jobpilot": "bin/jobpilot.mjs"
+  },
+  "scripts": {
+    "start": "node bin/jobpilot.mjs start",
+    "chrome": "node bin/jobpilot.mjs chrome",
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.3.0",
+    "pdfjs-dist": "^4.10.38",
+    "playwright-core": "^1.47.0"
+  },
+  "license": "MIT",
+  "author": "Sai Kolla"
+}
