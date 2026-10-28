@@ -105,6 +105,9 @@ function tf(tokens) {
   return m;
 }
 
+// role score for a specialized resume when the job title is just "Software Engineer"
+const GENERIC_ROLE = 0.85;
+
 /** Build the matcher once per run from the resumes folder. */
 export function buildMatcher(resumes) {
   const docs = resumes.map((r) => ({ ...r, tf: tf(tokenize(`${r.text} ${(r.keywords || []).join(' ')}`)), tagsResolved: resumeTags(r) }));
@@ -122,6 +125,7 @@ export function buildMatcher(resumes) {
   return function match(job) {
     if (!docs.length) return { resume: null, score: 0, ranking: [], jobTags: [] };
     const jobTags = titleTags(job.title);
+    const generic = jobTags.length === 1 && jobTags[0] === 'swe';
     const jv = vec(tf(tokenize(`${job.title} ${job.title} ${job.description || ''}`)));
     const rows = docs.map((d) => {
       let dot = 0; const shared = [];
@@ -134,7 +138,13 @@ export function buildMatcher(resumes) {
       // software engineer resume is a soft fallback for any engineering title
       const hits = jobTags.filter((t) => d.tagsResolved.includes(t));
       let role = hits.length ? hits.length / jobTags.length : 0;
-      if (!hits.length && d.tagsResolved.includes('swe') && jobTags.some((t) => t !== 'annotation')) role = 0.35;
+      if (!hits.length) {
+        // A plain "Software Engineer" title says nothing about the kind of
+        // work, so any engineering resume gets most of the role score and the
+        // posting's text decides. The general resume keeps an edge for close calls.
+        if (generic && d.tagsResolved.some((t) => t !== 'annotation')) role = GENERIC_ROLE;
+        else if (d.tagsResolved.includes('swe') && jobTags.some((t) => t !== 'annotation')) role = 0.35;
+      }
       return {
         file: d.file, path: d.path, name: d.name, isDefault: d.isDefault, cos, role, tags: d.tagsResolved,
         roleHits: hits,
@@ -146,7 +156,8 @@ export function buildMatcher(resumes) {
     rows.sort((a, b) => (b.score - a.score) || (Number(b.isDefault) - Number(a.isDefault)) || a.file.localeCompare(b.file));
     const best = rows[0];
     const why = [
-      best.roleHits.length ? `title fits ${best.roleHits.join(', ')}` : `no role tag matched (${jobTags.join(', ')})`,
+      best.roleHits.length ? `title fits ${best.roleHits.join(', ')}`
+        : generic ? 'general title, so the posting decided' : `no role tag matched (${jobTags.join(', ')})`,
       best.topTerms.length ? `shared: ${best.topTerms.join(', ')}` : '',
     ].filter(Boolean).join('; ');
     return { resume: best, score: best.score, ranking: rows, jobTags, why };

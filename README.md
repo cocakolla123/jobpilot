@@ -140,6 +140,8 @@ There's no AI here. Every pick can be explained.
 2. **Content fit.** The posting text is compared with each resume's text using TF-IDF similarity. Words every resume shares count little, so the words that set your resumes apart count most.
 3. **Score.** 55% role fit plus 45% content fit. Ties go to your default resume.
 
+A plain title like "Software Engineer" says nothing about the kind of work, so for those the posting's text decides. A React heavy posting gets your frontend resume, and an ordinary one still gets your default.
+
 The Jobs tab shows the score, the matching tags and the shared terms for each pick. You can change the resume on any job before applying. Paste any posting into **Test a match** on the Resumes tab to see how all your resumes rank for it.
 
 ---

@@ -116,6 +116,11 @@ test('matcher: picks the resume that fits the role and the text', () => {
   assert.equal(match({ title: 'Backend Software Engineer', description: 'Java, Spring Boot and Kafka services' }).resume.file, 'Jane_Resume.pdf');
   const m = match({ title: 'Software Engineer', description: 'React and TypeScript front end' });
   assert.ok(m.why.length > 0 && m.ranking.length === 3);
+  // a plain title lets the posting decide, and the general resume wins close calls
+  assert.equal(m.resume.file, 'Jane_Resume_Frontend.pdf', m.why);
+  assert.match(m.why, /posting decided/);
+  assert.equal(match({ title: 'Software Engineer', description: 'Java, Spring Boot, REST APIs and AWS' }).resume.file, 'Jane_Resume.pdf');
+  assert.equal(match({ title: 'Software Engineer', description: 'Build services and ship features' }).resume.file, 'Jane_Resume.pdf');
   assert.deepEqual(resumeTags({ file: 'Jane_Doe_Resume_FDE.pdf' }), ['fde']);
   assert.deepEqual(resumeTags({ file: 'Jane_Doe_Resume_ML.pdf' }), ['ml']);
   assert.ok(!resumeTags({ file: 'my_html_resume.pdf' }).includes('ml'), '"html" is not ML');
