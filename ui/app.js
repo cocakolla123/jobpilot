@@ -2455,7 +2455,7 @@ function renderSettings() {
       switchRow('Upload new or edited resumes before applying', s.autoSyncResumes !== false, (v) => { s.autoSyncResumes = v; dirty(); }, { hint: 'Before Apply starts, any resume you added or changed is uploaded to LinkedIn and Handshake with today\'s date and time in its name, so the newest copy is always the one picked. Indeed is switched per job either way.' })),
     h('section', { class: 'card' },
       cardHead('Advanced'),
-      field('Chrome debugging port', numInput(s.cdpPort, (v) => { s.cdpPort = v; }, { min: 1024, max: 65535 }), { hint: 'The port JobPilot uses to talk to its Chrome window. Leave it at 9222 unless something else uses that port.' }),
+      field('Chrome debugging port', numInput(s.cdpPort, (v) => { s.cdpPort = v; }, { min: 1024, max: 65535 }), { hint: 'The port JobPilot tries first for its Chrome window. If another app is already using it, JobPilot picks a free port on its own.' }),
       h('div', { style: { marginTop: '16px' } },
         field('Workspace folder', h('div', { class: 'copy-field' },
           h('input', { class: 'input', readonly: 'readonly', value: ws, 'aria-label': 'Workspace folder' }),

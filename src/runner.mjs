@@ -53,9 +53,9 @@ export class Runner extends EventEmitter {
   async connect() {
     const settings = loadSettings(this.ws);
     if (this.session) { try { await this.session.context.pages(); return this.session; } catch { this.session = null; } }
-    const up = await launchChrome(this.ws, settings.cdpPort);
-    if (!up) throw new Error(`Chrome did not start on port ${settings.cdpPort}.`);
-    this.session = await attach(settings.cdpPort);
+    const port = await launchChrome(this.ws, settings.cdpPort);
+    if (!port) throw new Error("JobPilot's Chrome did not start. If its window is already open, quit it and try again.");
+    this.session = await attach(port);
     this.session.browser.on('disconnected', () => { this.session = null; });
     return this.session;
   }

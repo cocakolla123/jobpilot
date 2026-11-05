@@ -36,8 +36,9 @@ async function cli(task) {
 }
 
 if (cmd === 'chrome') {
-  const ok = await launchChrome(ws, loadSettings(ws).cdpPort, ['https://www.linkedin.com/login', 'https://app.joinhandshake.com/login', 'https://secure.indeed.com/auth']);
-  console.log(ok ? 'JobPilot Chrome is open. Sign in to LinkedIn, Handshake and Indeed there once; it remembers you.' : 'Chrome did not start.');
+  const port = await launchChrome(ws, loadSettings(ws).cdpPort, ['https://www.linkedin.com/login', 'https://app.joinhandshake.com/login', 'https://secure.indeed.com/auth']);
+  console.log(port ? `JobPilot Chrome is open (port ${port}). Sign in to LinkedIn, Handshake and Indeed there once; it remembers you.`
+    : "Chrome did not start. If JobPilot's Chrome window is already open, quit it and try again.");
 } else if (['search', 'apply', 'check', 'sync'].includes(cmd)) {
   await cli(cmd);
 } else {

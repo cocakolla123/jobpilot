@@ -3,6 +3,7 @@
 // and Indeed once in that window and the logins stick. Playwright only
 // attaches; it never launches a test browser, so sites see a normal Chrome.
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, execSync } from 'node:child_process';
@@ -36,27 +37,71 @@ export function findChrome() {
 
 export const cdpUrl = (port) => `http://127.0.0.1:${port}`;
 
-export async function chromeIsUp(port) {
-  try { const r = await fetch(`${cdpUrl(port)}/json/version`); return r.ok; } catch { return false; }
+/** What answers on a debugging port (/json/version), or null when nothing does. */
+export async function chromeInfo(port) {
+  try {
+    const r = await fetch(`${cdpUrl(port)}/json/version`, { signal: AbortSignal.timeout(2000) });
+    return r.ok ? await r.json() : null;
+  } catch { return null; }
 }
 
-/** Opens JobPilot's Chrome (once). Returns true when it is listening. */
-export async function launchChrome(ws, port, startUrls = []) {
-  if (await chromeIsUp(port)) return true;
+export async function chromeIsUp(port) { return !!(await chromeInfo(port)); }
+
+/**
+ * The port JobPilot's own Chrome is listening on, or null when it isn't running.
+ * Chrome writes DevToolsActivePort (the port, then the browser's socket path)
+ * into its profile folder, so this only ever finds the Chrome using JobPilot's
+ * profile. Other apps often sit on 9222 too (Electron apps, other automation
+ * tools, a personal Chrome with debugging on), and attaching to one of those
+ * fails with errors like "Browser context management is not supported".
+ */
+export async function ownChromePort(ws) {
+  let port, socketPath;
+  try {
+    [port, socketPath] = fs.readFileSync(path.join(ws.chromeProfile, 'DevToolsActivePort'), 'utf8').split('\n').map((s) => s.trim());
+  } catch { return null; }
+  const info = await chromeInfo(Number(port));
+  return info?.webSocketDebuggerUrl && socketPath && info.webSocketDebuggerUrl.endsWith(socketPath) ? Number(port) : null;
+}
+
+function portFree(port) {
+  return new Promise((resolve) => {
+    const s = net.createServer();
+    s.once('error', () => resolve(false));
+    s.once('listening', () => s.close(() => resolve(true)));
+    s.listen(port, '127.0.0.1');
+  });
+}
+
+/**
+ * Opens JobPilot's Chrome (once) and returns the port it listens on, or null
+ * if it did not start. Uses the preferred port when it is free; when another
+ * app holds it, Chrome picks a free port and says which in DevToolsActivePort.
+ */
+export async function launchChrome(ws, preferredPort, startUrls = [], { headless = false } = {}) {
+  const running = await ownChromePort(ws);
+  if (running) return running;
   const bin = findChrome();
   if (!bin) throw new Error('Google Chrome was not found. Install it, or set JOBPILOT_CHROME to its path.');
   fs.mkdirSync(ws.chromeProfile, { recursive: true });
+  fs.rmSync(path.join(ws.chromeProfile, 'DevToolsActivePort'), { force: true });   // left over from a crash
+  const port = preferredPort && await portFree(preferredPort) ? preferredPort : 0;
   const args = [
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${ws.chromeProfile}`,
     '--no-first-run',
     '--no-default-browser-check',
+    ...(headless ? ['--headless=new'] : []),
     ...startUrls,
   ];
   const child = spawn(bin, args, { detached: true, stdio: 'ignore' });
   child.unref();
-  for (let i = 0; i < 60; i++) { if (await chromeIsUp(port)) return true; await sleep(500); }
-  return false;
+  for (let i = 0; i < 60; i++) {
+    const p = await ownChromePort(ws);
+    if (p) return p;
+    await sleep(500);
+  }
+  return null;
 }
 
 /** Attach to JobPilot's Chrome. Tabs JobPilot opens are the only ones it closes. */

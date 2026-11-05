@@ -14,7 +14,7 @@ import { buildMatcher, resumeTags } from './core/matcher.mjs';
 import { PROFILE_FIELDS, addAnswer, profileAnswers } from './core/answers.mjs';
 import { extractSkills } from './core/skills.mjs';
 import { readQueue, resolveQuestion } from './core/review.mjs';
-import { chromeIsUp, findChrome, launchChrome } from './core/chrome.mjs';
+import { findChrome, launchChrome, ownChromePort } from './core/chrome.mjs';
 import { Runner, SOURCES, PLATFORMS } from './runner.mjs';
 import { loadSync } from './core/resumeSync.mjs';
 import { AI_MODELS, AI_PROVIDERS, aiSettings, keyStatus, saveApiKey, removeApiKey, draftAnswer, claudeCodeStatus } from './core/ai.mjs';
@@ -79,7 +79,7 @@ export async function startServer(ws, { port = 4123 } = {}) {
       return {
         workspace: ws.dir, sources: SOURCES.map((s) => ({ id: s, label: PLATFORMS[s].label })), settings, runner: runner.state,
         counts, totalJobs: jobs.length, questions: readQueue(ws).length,
-        chrome: { found: !!findChrome(), running: await chromeIsUp(settings.cdpPort) },
+        chrome: { found: !!findChrome(), running: !!(await ownChromePort(ws)) },
         setup: {
           resumes: resumes.length, profile: profileStatus(profile),
           searches: (readJson(ws.searches, []) || []).length,
@@ -207,7 +207,7 @@ export async function startServer(ws, { port = 4123 } = {}) {
     },
     'GET /api/sync': async () => ({ records: loadSync(ws), last: lastSync }),
     'POST /api/run/stop': async () => { runner.stop(); return { stopping: true }; },
-    'POST /api/chrome/open': async () => ({ running: await launchChrome(ws, loadSettings(ws).cdpPort) }),
+    'POST /api/chrome/open': async () => ({ running: !!(await launchChrome(ws, loadSettings(ws).cdpPort)) }),
     'POST /api/chrome/login': async (b) => ({ opened: await runner.openLogin(b.source) }),
   };
 
