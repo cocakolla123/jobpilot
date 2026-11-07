@@ -1,0 +1,20 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Lever-like application</title></head>
+<body>
+<!-- like Lever: labels are divs, "Current location" is a plain text box, and
+     Enter in any text box submits the form -->
+<form id="application-form" action="/never-sent" method="post">
+  <ul>
+    <li class="application-question"><div class="application-label">Full name ✱</div><div class="application-field"><input type="text" name="name" required></div></li>
+    <li class="application-question"><div class="application-label">Email ✱</div><div class="application-field"><input type="email" name="email" required></div></li>
+    <li class="application-question"><div class="application-label">Current location</div><div class="application-field"><input type="text" name="location"></div></li>
+    <li class="application-question"><div class="application-label">Tell us about an excellent project you built</div><div class="application-field"><textarea name="project"></textarea></div></li>
+    <li class="application-question"><div class="application-label">What was a major challenge you faced and how did you overcome it?</div><div class="application-field"><textarea name="challenge"></textarea></div></li>
+  </ul>
+  <button type="submit">Submit application</button>
+</form>
+<script>
+  window.__submits = 0;
+  document.getElementById('application-form').addEventListener('submit', (e) => { e.preventDefault(); window.__submits++; });
+</script>
+</body></html>

@@ -25,19 +25,24 @@ export function parseCsv(text) {
 }
 
 export function csvField(v) {
-  const s = String(v ?? '');
+  let s = String(v ?? '');
+  // a scraped title like "=HYPERLINK(...)" must not run as a formula in Excel
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
   return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 
+// The byte order mark tells Excel the file is UTF-8, so accented names show correctly.
 export function ensureSheet(p) {
-  if (!fs.existsSync(p) || fs.statSync(p).size === 0) fs.writeFileSync(p, HEADER.join(',') + '\n');
+  if (!fs.existsSync(p) || fs.statSync(p).size === 0) fs.writeFileSync(p, '\uFEFF' + HEADER.join(',') + '\n');
 }
+
+const cleanHeader = (h) => String(h).replace(/^\uFEFF/, '').trim();
 
 /** Rows as objects keyed by the file's own header (so older sheets still read). */
 export function readSheet(p) {
   if (!fs.existsSync(p)) return [];
   const rows = parseCsv(fs.readFileSync(p, 'utf8'));
-  const head = (rows.shift() || []).map((h) => h.trim());
+  const head = (rows.shift() || []).map(cleanHeader);
   return rows
     .filter((r) => r.some((f) => f !== ''))
     .map((r) => Object.fromEntries(head.map((h, i) => [h, (r[i] ?? '').trim()])));
@@ -45,7 +50,8 @@ export function readSheet(p) {
 
 export function appendRow(p, row) {
   ensureSheet(p);
-  const head = parseCsv(fs.readFileSync(p, 'utf8').split('\n')[0] + '\n')[0] || HEADER;
+  const first = parseCsv(fs.readFileSync(p, 'utf8').split('\n')[0] + '\n')[0];
+  const head = first?.length ? first.map(cleanHeader) : HEADER;
   const line = head.map((k) => csvField(row[k] ?? '')).join(',');
   const size = fs.statSync(p).size;
   let prefix = '';
@@ -66,18 +72,35 @@ export const DONE_STATUSES = new Set([
   'assessment_pending', 'assessment_submitted', 'role_closed', 'already_applied',
 ]);
 
+// Statuses that mean the application really went out (not just filled in).
+export const SENT_STATUSES = new Set([
+  'submitted', 'applied', 'interview', 'offer', 'rejected', 'assessment_pending', 'assessment_submitted', 'already_applied',
+]);
+
 export function dedupIndex(rows) {
   const done = new Set();
   const ids = new Set();
+  const sent = new Set();
+  const sentIds = new Set();
   for (const r of rows) {
-    if (!DONE_STATUSES.has(String(r.status || '').toLowerCase())) continue;
+    const st = String(r.status || '').toLowerCase();
+    if (!DONE_STATUSES.has(st)) continue;
     done.add(dedupKey(r.company, r.title));
     if (r.source && r.job_id) ids.add(`${r.source}:${r.job_id}`);
+    if (SENT_STATUSES.has(st)) {
+      sent.add(dedupKey(r.company, r.title));
+      if (r.source && r.job_id) sentIds.add(`${r.source}:${r.job_id}`);
+    }
   }
   return {
     isDone(job) {
       return (job.source && job.jobId && ids.has(`${job.source}:${job.jobId}`))
         || done.has(dedupKey(job.company, job.title));
+    },
+    /** True only when an application for this job actually went out. */
+    isSent(job) {
+      return (job.source && job.jobId && sentIds.has(`${job.source}:${job.jobId}`))
+        || sent.has(dedupKey(job.company, job.title));
     },
     markDone(job) {
       done.add(dedupKey(job.company, job.title));
@@ -86,9 +109,35 @@ export function dedupIndex(rows) {
   };
 }
 
+// your own calendar day, not the UTC one (which flips mid afternoon in the US)
+const localDay = (d) => { const x = new Date(d); return Number.isNaN(x.getTime()) ? '' : x.toLocaleDateString('en-CA'); };
+
 /** Submitted rows today for one source, for the daily caps. */
 export function submittedToday(rows, source, now = new Date()) {
-  const day = now.toISOString().slice(0, 10);
+  const day = localDay(now);
   return rows.filter((r) => r.source === source && String(r.status).toLowerCase() === 'submitted'
-    && String(r.timestamp || '').slice(0, 10) === day).length;
+    && localDay(r.timestamp) === day).length;
+}
+
+/**
+ * appendRow that never throws. Rows that could not be written (the file is open
+ * in Excel on Windows, say) are kept in pendingPath and written first next time.
+ */
+export function appendRowSafe(p, pendingPath, row) {
+  let pending = [];
+  try { pending = JSON.parse(fs.readFileSync(pendingPath, 'utf8')); } catch { /* none waiting */ }
+  if (!Array.isArray(pending)) pending = [];
+  const rows = row ? [...pending, row] : pending;
+  try {
+    ensureSheet(p);
+    while (rows.length) { appendRow(p, rows[0]); rows.shift(); }
+    fs.rmSync(pendingPath, { force: true });
+    return { ok: true };
+  } catch (e) {
+    try {
+      fs.mkdirSync(pendingPath.replace(/[\\/][^\\/]+$/, ''), { recursive: true });
+      fs.writeFileSync(pendingPath, JSON.stringify(rows, null, 2));
+    } catch { /* nowhere to keep it */ }
+    return { ok: false, code: e.code, error: String(e.message || e) };
+  }
 }

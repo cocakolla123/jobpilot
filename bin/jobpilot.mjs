@@ -8,14 +8,24 @@
 //   jobpilot sync            upload your resumes to each site under dated names
 // Options: --workspace <folder>   --port <n>   --no-open
 import { spawn } from 'node:child_process';
+import os from 'node:os';
+import path from 'node:path';
 import { ensureWorkspace, defaultWorkspaceDir, loadSettings } from '../src/core/config.mjs';
 import { launchChrome } from '../src/core/chrome.mjs';
 
 const args = process.argv.slice(2);
-const flag = (name, def) => { const i = args.indexOf(`--${name}`); return i >= 0 && args[i + 1] ? args[i + 1] : def; };
+// both "--workspace <folder>" and "--workspace=<folder>"
+const flag = (name, def) => {
+  const eq = args.find((a) => a.startsWith(`--${name}=`));
+  if (eq) return eq.slice(name.length + 3);
+  const i = args.indexOf(`--${name}`);
+  return i >= 0 && args[i + 1] ? args[i + 1] : def;
+};
+// Windows does not expand ~, so do it here
+const expandHome = (p) => (p === '~' || /^~[\\/]/.test(p) ? path.join(os.homedir(), p.slice(1)) : p);
 const VALUE_FLAGS = new Set(['--workspace', '--port', '--limit']);
 const cmd = args.find((a, i) => !a.startsWith('--') && !VALUE_FLAGS.has(args[i - 1])) || 'start';
-const ws = ensureWorkspace(flag('workspace', defaultWorkspaceDir()));
+const ws = ensureWorkspace(path.resolve(expandHome(flag('workspace', defaultWorkspaceDir()))));
 
 function openInBrowser(url) {
   const c = process.platform === 'darwin' ? ['open', [url]] : process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]] : ['xdg-open', [url]];
@@ -36,9 +46,13 @@ async function cli(task) {
 }
 
 if (cmd === 'chrome') {
-  const port = await launchChrome(ws, loadSettings(ws).cdpPort, ['https://www.linkedin.com/login', 'https://app.joinhandshake.com/login', 'https://secure.indeed.com/auth']);
-  console.log(port ? `JobPilot Chrome is open (port ${port}). Sign in to LinkedIn, Handshake and Indeed there once; it remembers you.`
-    : "Chrome did not start. If JobPilot's Chrome window is already open, quit it and try again.");
+  try {
+    const port = await launchChrome(ws, loadSettings(ws).cdpPort, ['https://www.linkedin.com/login', 'https://app.joinhandshake.com/login', 'https://secure.indeed.com/auth'], { log: (m) => console.log(m) });
+    console.log(`JobPilot Chrome is open (port ${port}). Sign in to LinkedIn, Handshake and Indeed there once; it remembers you.`);
+  } catch (e) {
+    console.error(e.message);
+    process.exitCode = 1;
+  }
 } else if (['search', 'apply', 'check', 'sync'].includes(cmd)) {
   await cli(cmd);
 } else {

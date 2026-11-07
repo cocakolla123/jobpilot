@@ -23,12 +23,15 @@ const WALL_URL = /checkpoint|authwall|uas\/login|\/login\b|\/signin\b|security-v
 const WALL_TEXT = /let's do a quick security check|verify you('| a)re (a )?human|unusual activity|additional verification required|are you a robot|press (and|&) hold/i;
 
 /** Throws SecurityStop when the page is a login wall, captcha or bot check. */
+const SITE_NAME = { linkedin: 'LinkedIn', handshake: 'Handshake', indeed: 'Indeed', ats: 'The company site' };
+
 export async function assertNoWall(page, source) {
+  const site = SITE_NAME[source] || source;
   const url = page.url();
-  if (WALL_URL.test(url)) throw new SecurityStop(`${source}: login or security page (${new URL(url).pathname}). Sign in or finish the check in the browser, then run again.`, source);
-  if (await detectCaptcha(page)) throw new SecurityStop(`${source}: a captcha is showing. JobPilot never solves captchas, so finish it in the browser and run again.`, source);
+  if (WALL_URL.test(url)) throw new SecurityStop(`${site} wants you to sign in or finish a security check. Do it in the open tab in JobPilot's Chrome, then run again.`, source);
+  if (await detectCaptcha(page)) throw new SecurityStop(`${site} is showing a "prove you're human" check. JobPilot never solves these, so finish it in the open tab in JobPilot's Chrome and run again.`, source);
   const t = await page.getByText(WALL_TEXT).first().isVisible({ timeout: 300 }).catch(() => false);
-  if (t) throw new SecurityStop(`${source}: a security check is showing. Finish it in the browser, then run again.`, source);
+  if (t) throw new SecurityStop(`${site} is showing a security check. Finish it in the open tab in JobPilot's Chrome, then run again.`, source);
 }
 
 export const SENIOR_RE = /\b(senior|sr\.?|staff|principal|lead|director|distinguished|head\s+of)\b|\b([5-9]|1\d)\s*\+?\s*years?\b/i;

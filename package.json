@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node bin/jobpilot.mjs start",
     "chrome": "node bin/jobpilot.mjs chrome",
-    "test": "node --test \"test/*.test.mjs\""
+    "test": "node test/run.mjs"
   },
   "engines": {
     "node": ">=20"

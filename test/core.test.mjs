@@ -9,6 +9,7 @@ import { appendRow, readSheet, dedupIndex, submittedToday, parseCsv } from '../s
 import { upsertJob, loadJobs, updateJob, jobKey } from '../src/core/jobs.mjs';
 import { profileAnswers, loadAnswerBank, matchAnswer, pickOption, addAnswer, normalizeLabel } from '../src/core/answers.mjs';
 import { extractSkills, skillAnswer, skillCoverage } from '../src/core/skills.mjs';
+import { hasFileName } from '../src/core/forms.mjs';
 import { buildMatcher, titleTags, resumeTags, tokenize } from '../src/core/matcher.mjs';
 import { docxText, readZipEntry } from '../src/core/resumes.mjs';
 import { isSenior, skipReason } from '../src/core/safety.mjs';
@@ -16,7 +17,7 @@ import * as linkedin from '../src/platforms/linkedin.mjs';
 import * as handshake from '../src/platforms/handshake.mjs';
 import * as indeed from '../src/platforms/indeed.mjs';
 import * as ats from '../src/platforms/ats.mjs';
-import { writeJson } from '../src/core/config.mjs';
+import { writeJson, readJson } from '../src/core/config.mjs';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'jobpilot-test-'));
 
@@ -298,4 +299,140 @@ test('AI: request shape (network stubbed, nothing is sent)', async () => {
     assert.equal(seen[0].body.fallbacks, undefined);
     assert.ok(!(seen[0].headers.get('anthropic-beta') || '').includes('server-side-fallback'));
   } finally { globalThis.fetch = realFetch; }
+});
+
+// ---- answer bank: matching that must never guess wrong --------------------------
+
+const bankFor = (profile, answers) => {
+  const ws = ensureWorkspace(tmp());
+  writeJson(ws.profile, profile);
+  if (answers) writeJson(ws.answers, answers);
+  return loadAnswerBank(ws);
+};
+
+test('essay and long questions never get an unrelated profile fact', () => {
+  const bank = bankFor({ ...PROFILE, yearsExperience: '1', openToOnsite: 'Yes', salary: '120000',
+    education: [{ school: 'UC Berkeley', major: 'Computer Science' }], experience: [{ company: 'Acme', title: 'Intern' }] },
+  [{ pattern: '^why do you want to work here', answer: 'Saved answer' }]);
+  const a = (q, o) => matchAnswer(bank, q, o)?.answer ?? null;
+  for (const q of [
+    'Tell us about an excellent project you built', // "excellent" holds "cell"
+    'Describe a time you delivered excellent results',
+    'What was a major challenge you faced and how did you overcome it?',
+    'What was a major challenge you faced?',
+    'Tell us about a time you worked with a financial institution',
+    'Describe a project where you worked on site reliability',
+    'Why are you interested in this job title?',
+    'How many years do you plan to stay with us, and why?',
+  ]) assert.equal(a(q), null, q);
+  // open-ended: only your own saved answers, never profile facts
+  assert.equal(a('What is your phone number?', { essay: true }), null);
+  assert.equal(a('Why do you want to work here?', { essay: true }), 'Saved answer');
+  // the real questions still work, short and long
+  assert.equal(a('Mobile phone number'), '555-0100');
+  assert.equal(a('What is your major?'), 'Computer Science');
+  assert.equal(a('College major'), 'Computer Science', 'the major, not the college');
+  assert.equal(a('University'), 'UC Berkeley', 'school comes from the first education entry');
+  assert.equal(a('Current company'), 'Acme');
+  assert.equal(a('Job title'), 'Intern');
+  assert.equal(a('First name (as it appears on your passport or government ID)'), 'Jane', 'anchored pattern works on a long label');
+  assert.equal(a('Please provide the email address we should use to contact you about this application'), 'jane@example.com');
+  assert.equal(a('Will you now or in the future require sponsorship for employment visa status?'), 'No');
+  assert.equal(a('This role is hybrid. Are you able to work in the office three days a week?'), 'Yes');
+});
+
+test('consent boxes: the starter pattern skips facts, and old workspaces are guarded too', () => {
+  const tpl = JSON.parse(fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'templates', 'answers.example.json'), 'utf8'));
+  const OLD = [{ q: 'consent', pattern: '^i (have read|agree|acknowledge|consent|certify|understand|confirm|attest)|privacy (policy|notice)|terms (of|and) (use|service|conditions)', answer: 'Yes', type: 'check' }];
+  const facts = ['I confirm that I will not require visa sponsorship now or in the future', 'I certify that I am legally authorized to work in the United States',
+    'I confirm I am at least 18 years old', 'I agree to receive marketing text messages'];
+  const tick = new RegExp(tpl[0].pattern, 'i');
+  for (const q of facts) assert.ok(!tick.test(normalizeLabel(q)), `template leaves "${q}" alone`);
+  for (const q of ['I agree to the privacy policy', 'I acknowledge that my answers are true and complete', 'I have read the Terms of Service']) assert.ok(tick.test(normalizeLabel(q)), q);
+
+  for (const answers of [undefined, OLD]) {
+    const bank = bankFor({ workAuthorized: 'No', needsSponsorship: 'Yes', over18: 'No' }, answers);
+    const m = (q) => matchAnswer(bank, q);
+    assert.equal(m(facts[0]), null, 'a negated statement is never answered Yes or No');
+    assert.equal(m(facts[1]).answer, 'No');
+    assert.notEqual(m(facts[1]).type, 'check', 'the profile wins over a tick-the-box answer');
+    assert.equal(m(facts[2]).answer, 'No');
+    assert.equal(m(facts[3]), null);
+    assert.equal(m('I agree to the privacy policy').type, 'check');
+  }
+});
+
+test('Yes/No options: "I will" never picks "I will not", and an option that says both is skipped', () => {
+  const yes = { answer: 'Yes', options: matchAnswer(bankFor({ needsSponsorship: 'Yes' }), 'Do you require sponsorship?').options };
+  const no = { answer: 'No', options: matchAnswer(bankFor({ needsSponsorship: 'No' }), 'Do you require sponsorship?').options };
+  const sp = ['I will not require sponsorship', 'I will require sponsorship'];
+  assert.equal(pickOption(sp, yes), 1);
+  assert.equal(pickOption(sp, no), 0);
+  assert.equal(pickOption(["I won't need sponsorship", 'I will need sponsorship'], yes), 1);
+  assert.equal(pickOption(['Yes, I will not need sponsorship', 'Yes, I will need sponsorship', 'No'], yes), 1, '"Yes, I will not" reads both ways');
+  const auth = { answer: 'Yes', options: matchAnswer(bankFor({ workAuthorized: 'Yes' }), 'Are you authorized to work in the US?').options };
+  assert.equal(pickOption(['I am authorized to work in the US but will require sponsorship', 'I am authorized to work in the US', 'I am not authorized'], auth), 1);
+});
+
+test('decline options in common EEO wording, and whole-word option matching', () => {
+  const g = matchAnswer(bankFor({}), 'Veteran status');
+  for (const opt of ["I don't wish to answer", 'I do not want to answer', "I don't want to answer", "I'd rather not say", 'Prefer not to say', 'I choose not to disclose']) {
+    assert.equal(pickOption(['I am a protected veteran', 'I am not a protected veteran', opt], g), 2, opt);
+  }
+  const male = { answer: 'Male', options: [] };
+  assert.equal(pickOption(['Female', 'Man'], male), -1, '"female" contains "male" but is not it');
+  assert.equal(pickOption(['Female', 'Male'], male), 1);
+  assert.equal(pickOption(['Yes', 'Not applicable'], { answer: 'No', options: ['^no\\b'] }), -1, 'No never picks Not applicable');
+  assert.equal(pickOption(['Yes', 'No'], { answer: 'No', options: [] }), 1);
+  assert.equal(pickOption(['Asian (including Indian subcontinent)', 'White'], { answer: 'Asian', options: [] }), 0);
+});
+
+test('questions in any language: no empty patterns saved or used', () => {
+  assert.equal(normalizeLabel('您是否需要签证担保？'), '您是否需要签证担保');
+  assert.equal(normalizeLabel('¿Género?'), 'género');
+  const ws = ensureWorkspace(tmp());
+  writeJson(ws.profile, PROFILE);
+  const e = addAnswer(ws, { question: '您是否需要签证担保？', answer: 'No' });
+  assert.equal(e.pattern, '^您是否需要签证担保');
+  assert.throws(() => addAnswer(ws, { question: '？？ !!', answer: 'x' }), /no words to match/);
+  // entries that would answer every question are ignored
+  writeJson(ws.answers, [{ pattern: '^', answer: 'BAD' }, { pattern: '', answer: 'BAD' }, { pattern: '.*', answer: 'BAD' }, { answer: 'BAD' }, ...readJson(ws.answers, [])]);
+  const bank = loadAnswerBank(ws);
+  assert.equal(matchAnswer(bank, 'First name')?.answer, 'Jane');
+  assert.equal(matchAnswer(bank, 'Why do you want to work here?'), null);
+  assert.equal(matchAnswer(bank, '您是否需要签证担保？')?.answer, 'No');
+});
+
+test('skills: 0 years stays 0, and no skills means unknown', () => {
+  assert.equal(skillAnswer('How many years of experience do you have with React?', [{ name: 'React', years: 0 }]).answer, '0');
+  assert.equal(skillAnswer('How many years of experience do you have with React?', [{ name: 'React', years: '' }]).answer, '1', 'a blank number still means you have it');
+  assert.equal(skillAnswer('Do you have experience with Python?', []), null);
+  const bank = bankFor({ firstName: 'Jane', yearsExperience: '2' });
+  assert.equal(matchAnswer(bank, 'How many years of experience do you have with React?'), null, 'not your total years, not 0');
+  assert.equal(matchAnswer(bank, 'Do you have experience with Python?'), null);
+  assert.equal(matchAnswer(bank, 'How many years of professional experience do you have?')?.answer, '2');
+});
+
+test('graduation: a year field gets the year, a date field gets month and year', () => {
+  const bank = bankFor({ education: [{ school: 'UC Berkeley', gradMonth: 'May', gradYear: '2027' }] });
+  const a = (q) => matchAnswer(bank, q)?.answer;
+  assert.equal(a('Graduation year'), '2027');
+  assert.equal(a('Expected graduation year'), '2027');
+  assert.equal(a('What year do you expect to graduate?'), '2027');
+  assert.equal(a('Expected graduation date'), 'May 2027');
+  assert.equal(a('Expected graduation'), 'May 2027');
+  assert.equal(a('Expected graduation (month/year)'), 'May 2027');
+  assert.equal(a('Graduation month'), 'May');
+  assert.equal(a('High school graduation year'), undefined, 'your education entries are not your high school');
+  assert.equal(a('High school name'), undefined);
+  assert.equal(a('School'), 'UC Berkeley');
+});
+
+test('resume file names match exactly', () => {
+  assert.ok(hasFileName('Jane_Doe_Resume.pdf', 'Jane_Doe_Resume.pdf'));
+  assert.ok(hasFileName('Attached: Jane_Doe_Resume.pdf Remove', '/x/y/Jane_Doe_Resume.pdf'));
+  assert.ok(hasFileName('Jane_Doe_Resume', 'Jane_Doe_Resume.pdf'), 'a document named without its extension');
+  assert.ok(!hasFileName('Jane_Doe_Resume_ML_2026.pdf', 'Jane_Doe_Resume.pdf'));
+  assert.ok(!hasFileName('Old_Jane_Doe_Resume.pdf', 'Jane_Doe_Resume.pdf'));
+  assert.ok(!hasFileName('Jane_Doe_Resume.docx', 'Jane_Doe_Resume.pdf'));
 });

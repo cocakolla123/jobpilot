@@ -1,0 +1,18 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Radios without fieldsets</title></head>
+<body>
+<!-- radio groups with no fieldset or legend: the question is a plain div before the options -->
+<form onsubmit="return false">
+  <div class="q"><div class="title">Are you legally authorized to work in the US?</div>
+    <div><input type="radio" id="a1" name="auth" value="yes"><label for="a1">Yes</label>
+         <input type="radio" id="a2" name="auth" value="no"><label for="a2">No</label></div></div>
+  <div class="q"><div class="title">Will you require visa sponsorship?</div>
+    <div><input type="radio" id="s1" name="sp" value="wont"><label for="s1">I will not require sponsorship</label>
+         <input type="radio" id="s2" name="sp" value="will"><label for="s2">I will require sponsorship</label></div></div>
+  <div class="q"><span>Are you willing to relocate?</span>
+    <label><input type="radio" value="Yes"> Yes</label> <label><input type="radio" value="No"> No</label></div>
+  <div class="q"><div class="title">What is your favorite color?</div>
+    <div><input type="radio" id="c1" name="color" value="blue"><label for="c1">Blue</label>
+         <input type="radio" id="c2" name="color" value="red"><label for="c2">Red</label></div></div>
+</form>
+</body></html>

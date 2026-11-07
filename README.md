@@ -43,6 +43,8 @@ Do these once, in this order. The dashboard's Setup tab walks you through the sa
 
 ### 1. Sign in to each site in JobPilot's Chrome
 
+On the Setup tab, pick the sites you use (any of LinkedIn, Handshake and Indeed). Searches, Apply and the account check skip the others.
+
 Click **Open Chrome** in the dashboard (or run `npm run chrome`). JobPilot opens its own Chrome window with its own profile, separate from your normal Chrome. Sign in to LinkedIn, Handshake and Indeed there once. It remembers you after that.
 
 JobPilot never creates accounts, never types your passwords, and never solves captchas. If a site shows a login page or a security check, that site stops and the dashboard tells you. Finish the check in that window yourself, then run again.
@@ -79,7 +81,7 @@ Then click **Check accounts**. It confirms you are signed in on each site, and s
 
 The Profile tab asks what most application forms ask:
 * name, contact details and links
-* school, degree, GPA and graduation date
+* education, experience, projects, certifications and other links, with as many entries as you like in each. Put your highest degree and your current or most recent job first, because questions that want one answer ("School", "Current employer") use the first entry
 * work authorization, sponsorship and visa status
 * start date, relocation and salary
 * the voluntary questions (gender, race, veteran and disability status), which default to "Decline to self identify" unless you choose otherwise
@@ -108,7 +110,9 @@ On the Searches tab, set keywords, location, level (internship, entry), how rece
 * When a site confirms the application, that tab closes.
 * If anything is unsure, the tab stays open with the form filled in so you can finish it yourself. Unsure means a question it can't answer, an AI answer you should read, submit being turned off, an error, or no confirmation from the site.
 * Once 8 tabs are waiting (you can change this), the run pauses and asks you to finish them first. Closing a tab frees its slot.
-* After you submit one yourself, click **I submitted it** on the Jobs tab so it goes into your sheet.
+* After you submit one yourself, click **I sent it** on the Jobs tab (it says **I applied** for company site jobs) so it goes into your sheet. **Show tab** brings a job's open tab to the front.
+* **Retry** gives a job another real try, even one that was only filled in before. A job that was actually sent is never sent again.
+* If you stop JobPilot in the middle of an application (Ctrl+C, a crash, closing the laptop), that job is marked as a problem when JobPilot starts again, so you can check the site and press I sent it or Retry.
 
 ### Submit is off at first
 
@@ -160,11 +164,29 @@ The Jobs tab shows the score, the matching tags and the shared terms for each pi
   settings.json         settings
   jobs.json             saved jobs and their status
   resume-sync.json      the dated name of each resume on each site
-  logs/                 one log file per day
+  logs/                 one log file per day, plus chrome.log
   .chrome-profile/      JobPilot's Chrome sign-ins
 ```
 
 To copy your setup to another computer, copy this folder. Leave out `.chrome-profile/` and sign in again there.
+
+## If something goes wrong
+
+JobPilot fixes these by itself:
+* **Another app is using Chrome's debugging port.** JobPilot starts its Chrome on a free port instead.
+* **JobPilot's Chrome is open but not responding to JobPilot** (for example after its windows were closed but Chrome kept running). It is closed and reopened with its tabs.
+* **Chrome says the profile is in use after a crash or restart.** The leftover lock is cleared.
+* **JobPilot's Chrome is closed while it works.** It is reopened. A job that was being filled in when that happened is never resent on its own; it is marked so you can check the site.
+* **applications.csv is open in Excel.** The row is kept and added once the file is free.
+* **A settings file has a typo from hand editing.** The broken copy is saved next to it (`name.json.broken-<date>.json`) and JobPilot starts that file fresh.
+
+When it can't fix something, the activity log and the error message say what to do. The common ones:
+* **Google Chrome is not installed.** Install it from https://www.google.com/chrome.
+* **Chrome is managed by a school or employer** and blocks remote control. Use a personal computer, or install Chromium and set `JOBPILOT_CHROME` to it.
+* **JobPilot's Chrome keeps closing.** Leave its window open (minimizing is fine) and run again.
+* **JobPilot is already running a task in another window.** Only one run happens at a time per workspace. Wait for the other one to finish.
+
+Chrome's own messages are saved in `logs/chrome.log` inside your workspace, which helps if you need to ask someone for help.
 
 ## Command line
 

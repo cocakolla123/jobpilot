@@ -1,6 +1,6 @@
 // LinkedIn: search, read a posting, press Save, and Easy Apply.
 import { assertNoWall, SecurityStop, sleep } from '../core/safety.mjs';
-import { fillAll, attachFiles, dedupeUnknowns } from '../core/forms.mjs';
+import { fillAll, attachFiles, dedupeUnknowns, beforeSubmit, submitConfirmed, selectResumeCard, fileNameRe, hasFileName, NOT_CONFIRMED, RESUME_UNCONFIRMED } from '../core/forms.mjs';
 
 export const source = 'linkedin';
 export const label = 'LinkedIn';
@@ -124,6 +124,7 @@ async function collectNewUi(page, max) {
 }
 
 const EASY_RE = /^\s*(easy apply|continue( applying)?)\s*$/i;
+const SENT_RE = /application (was )?(sent|submitted)/i;
 
 /** Opens the posting and reads title, company, location, description and how to apply. */
 export async function details(page, job, ctx) {
@@ -176,24 +177,31 @@ export async function externalUrl(page) {
   return /^https?:/.test(url) && !/linkedin\.com/.test(url) ? url : null;
 }
 
+/**
+ * On a resume step, select exactly `resumeFile` (never a longer name that
+ * starts the same, like Jane_Resume_ML.pdf for Jane_Resume.pdf) and read back
+ * which card is selected. Returns { state: 'none' | 'ok' | 'unconfirmed', used }.
+ */
 async function pickResume(dialog, resumeFile, resumePath) {
-  const want = resumeFile.replace(/\.(pdf|docx)$/i, '');
+  const want = resumeFile || String(resumePath || '').split(/[\\/]/).pop();
+  if (!fileNameRe(want)) return { state: 'none', used: null };
   const more = dialog.getByRole('button', { name: /show more resumes/i }).first();
   if (await more.isVisible({ timeout: 400 }).catch(() => false)) { await more.click().catch(() => {}); await sleep(600); }
-  const card = dialog.locator(`[class*="document-upload"]:has-text("${want}"), [class*="jobs-resume-picker"]:has-text("${want}"), label:has-text("${want}")`).first();
-  if (await card.isVisible({ timeout: 500 }).catch(() => false)) {
-    const radio = card.locator('input[type="radio"], [role="radio"]').first();
-    if (await radio.count()) await radio.check({ force: true }).catch(async () => { await card.click().catch(() => {}); });
-    else await card.click().catch(() => {});
-    return 'picked';
-  }
-  const onResumeStep = await dialog.getByText(/resume/i).first().isVisible({ timeout: 300 }).catch(() => false);
-  if (onResumeStep && await dialog.locator('input[type="file"]').count()) {
-    await attachFiles(dialog, { resume: resumePath });
-    await sleep(1500);
-    return 'uploaded';
-  }
-  return 'none';
+  const picked = await selectResumeCard(dialog, want);
+  if (picked.state === 'ok') return picked;
+  const hasInput = await dialog.locator('input[type="file"]').count().catch(() => 0);
+  if (picked.state === 'unconfirmed' && (picked.listed || !hasInput)) return picked;
+  // not in the list yet: upload it here, then check it is the one selected
+  const onResumeStep = picked.state !== 'none' || await dialog.getByText(/resume/i).first().isVisible({ timeout: 300 }).catch(() => false);
+  if (!onResumeStep || !hasInput) return { state: 'none', used: null };
+  const done = await attachFiles(dialog, { resume: resumePath });
+  if (!done.includes('resume')) return picked;
+  await sleep(1500);
+  const up = String(resumePath).split(/[\\/]/).pop();
+  const after = await selectResumeCard(dialog, up);
+  if (after.state !== 'none') return after;
+  // no cards: the window just names the uploaded file
+  return hasFileName(await dialog.innerText().catch(() => ''), up) ? { state: 'ok', used: up } : { state: 'unconfirmed', used: null };
 }
 
 /**
@@ -216,11 +224,19 @@ export async function apply(page, job, ctx) {
   const dialog = page.getByRole('dialog').first();
   await dialog.waitFor({ timeout: 10000 });
   const drafted = [];
-  const keep = (status, note, extra = {}) => ({ status, note, drafted, keepTab: true, ...extra });
+  let resumeUsed = null;
+  const keep = (status, note, extra = {}) => ({ status, note, drafted, resumeUsed, keepTab: true, ...extra });
   let hadErrors = false;
   for (let step = 0; step < 20; step++) {
     await sleep(700);
-    await pickResume(dialog, ctx.resumeFile, ctx.docs.resume);
+    const resume = await pickResume(dialog, ctx.resumeFile, ctx.docs.resume);
+    if (resume.state === 'ok') resumeUsed = resume.used;
+    if (resume.state === 'unconfirmed') {
+      // stop on the resume step so the wrong file is never sent
+      resumeUsed = resume.used;
+      const shown = resume.used ? ` (LinkedIn shows ${resume.used} selected)` : '';
+      return keep('needs_review', `${RESUME_UNCONFIRMED}; it should be ${ctx.resumeFile}${shown}`);
+    }
     const unknowns = [];
     await fillAll(page, dialog, ctx.bank, unknowns, { overwriteBadCity: true, draft: ctx.draft, drafted });
     const blocking = dedupeUnknowns(unknowns).filter((u) => u.required || !u.question.match(/optional/i));
@@ -236,10 +252,11 @@ export async function apply(page, job, ctx) {
       }
       if (!ctx.submit) return keep('filled_not_submitted', 'filled up to Submit; review and send it in the open tab (submit is off)');
       if (drafted.length && !ctx.aiAutoSubmit) return keep('needs_review', `AI wrote ${drafted.length} answer(s); read them in the open tab and press Submit`);
+      const before = await beforeSubmit(page, submit, SENT_RE);
       await submit.click({ timeout: 8000 });
-      const sent = await page.getByText(/application (was )?(sent|submitted)/i).first().isVisible({ timeout: 12000 }).catch(() => false);
-      if (!sent) return keep('submitted', 'Submit was pressed but LinkedIn showed no confirmation; check the open tab');
-      return { status: 'submitted', note: '', drafted };
+      const sent = await submitConfirmed(page, before, { re: SENT_RE, submit, timeout: ctx.confirmTimeout ?? 12000 });
+      if (!sent) return keep('needs_review', NOT_CONFIRMED);
+      return { status: 'submitted', note: '', drafted, resumeUsed };
     }
 
     const next = dialog.getByRole('button', { name: /^(next|review|continue)/i }).first();

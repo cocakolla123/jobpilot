@@ -10,8 +10,10 @@ import { chromium } from 'playwright-core';
 import { findChrome } from '../src/core/chrome.mjs';
 import { ensureWorkspace, writeJson } from '../src/core/config.mjs';
 import { loadAnswerBank } from '../src/core/answers.mjs';
-import { fillAll, attachFiles, dedupeUnknowns } from '../src/core/forms.mjs';
+import { fillAll, attachFiles, dedupeUnknowns, fillCheckboxes } from '../src/core/forms.mjs';
 import * as linkedin from '../src/platforms/linkedin.mjs';
+import * as ats from '../src/platforms/ats.mjs';
+import * as handshake from '../src/platforms/handshake.mjs';
 import { pdfText } from '../src/core/resumes.mjs';
 import { buildMatcher } from '../src/core/matcher.mjs';
 
@@ -20,7 +22,7 @@ let server, base, browser, ws, bank, resumePdf;
 
 before(async () => {
   server = http.createServer((req, res) => {
-    const name = req.url.startsWith('/jobs/view/') ? 'linkedin-easy-apply.html' : req.url.replace(/^\//, '').split('?')[0];
+    const name = req.url.startsWith('/jobs/view/') ? 'linkedin-easy-apply.html' : req.url.startsWith('/job-search/') ? 'handshake-apply.html' : req.url.replace(/^\//, '').split('?')[0];
     const f = path.join(FIX, name);
     if (!fs.existsSync(f)) { res.writeHead(404); return res.end('nope'); }
     res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(fs.readFileSync(f));
@@ -175,4 +177,138 @@ test('PDF resumes: text comes out of a real PDF and drives the match', async () 
   assert.equal(r.resume.file, 'Jane_A.pdf', r.why);
   const r2 = match({ title: 'Software Engineer', description: 'Own Kafka pipelines and PostgreSQL in a distributed systems team on Kubernetes.' });
   assert.equal(r2.resume.file, 'Jane_B.pdf', r2.why);
+});
+
+test('Submit off: a plain "Current location" box is never sent with Enter', async () => {
+  const page = await browser.newPage();
+  await page.goto(`${base}/lever-like.html`);
+  const unknowns = [];
+  await fillAll(page, page.locator('form'), bank, unknowns);
+  assert.equal(await page.evaluate(() => window.__submits), 0, 'filling never submitted the form');
+  assert.equal(await page.locator('input[name=location]').inputValue(), 'Austin, TX', 'full answer typed, no suggestion list needed');
+  assert.equal(await page.locator('input[name=name]').inputValue(), 'Jane Doe');
+  await page.close();
+});
+
+test('essay questions never get a profile fact, and AI is asked instead', async () => {
+  const page = await browser.newPage();
+  await page.goto(`${base}/lever-like.html`);
+  const unknowns = [];
+  await fillAll(page, page.locator('form'), bank, unknowns);
+  // "excellent" holds "cell" and "major challenge" holds "major": neither is a phone or major question
+  assert.equal(await page.locator('textarea[name=project]').inputValue(), '', 'no phone number typed into an essay');
+  assert.equal(await page.locator('textarea[name=challenge]').inputValue(), '');
+  const essays = dedupeUnknowns(unknowns).filter((u) => u.essay).map((u) => u.question);
+  assert.ok(essays.some((q) => /excellent project/.test(q)) && essays.some((q) => /major challenge/.test(q)), essays.join(' | '));
+
+  await page.reload();
+  const calls = [], drafted = [];
+  await fillAll(page, page.locator('form'), bank, [], { draft: fakeDraft(calls), drafted });
+  assert.deepEqual(calls.map((c) => c.question).sort(), ['Tell us about an excellent project you built', 'What was a major challenge you faced and how did you overcome it?']);
+  assert.equal(await page.locator('textarea[name=project]').inputValue(), 'I like React because the component model keeps UI code small.');
+  assert.equal(await page.evaluate(() => window.__submits), 0);
+  await page.close();
+});
+
+test('radio groups without a fieldset: grouped by name, question read from the text before them', async () => {
+  const page = await browser.newPage();
+  await page.goto(`${base}/radios-loose.html`);
+  const unknowns = [];
+  await fillAll(page, page.locator('form'), bank, unknowns);
+  const v = await page.evaluate(() => ({
+    auth: document.querySelector('input[name=auth]:checked')?.value || null,
+    sp: document.querySelector('input[name=sp]:checked')?.value || null,
+    relocate: [...document.querySelectorAll('input[type=radio]:not([name])')].filter((r) => r.checked).map((r) => r.value),
+  }));
+  assert.equal(v.auth, 'yes');
+  assert.equal(v.sp, 'wont', 'No sponsorship picks "I will not require", never "I will require"');
+  assert.deepEqual(v.relocate, ['Yes']);
+  const q = dedupeUnknowns(unknowns);
+  assert.deepEqual(q.map((u) => u.question), ['What is your favorite color?'], 'options are never queued as questions');
+  assert.deepEqual(q[0].options, ['Blue', 'Red']);
+  await page.close();
+});
+
+test('consent boxes that state a fact follow the profile, even with the old starter answers', async () => {
+  const ws2 = ensureWorkspace(fs.mkdtempSync(path.join(os.tmpdir(), 'jobpilot-forms-')));
+  writeJson(ws2.profile, { firstName: 'Jane', workAuthorized: 'No', needsSponsorship: 'Yes', over18: 'Yes' });
+  // the pattern every workspace got before this fix
+  writeJson(ws2.answers, [{ q: 'Consent', pattern: '^i (have read|agree|acknowledge|consent|certify|understand|confirm|attest)|privacy (policy|notice)|terms (of|and) (use|service|conditions)', answer: 'Yes', type: 'check' }]);
+  const page = await browser.newPage();
+  await page.goto(`${base}/consent.html`);
+  const unknowns = [];
+  await fillCheckboxes(page.locator('form'), loadAnswerBank(ws2), unknowns);
+  const ticked = await page.evaluate(() => Object.fromEntries([...document.querySelectorAll('input[type=checkbox]')].map((c) => [c.name, c.checked])));
+  assert.deepEqual(ticked, { privacy: true, auth: false, spon: false, sms: false, age: true });
+  const q = unknowns.map((u) => u.question);
+  assert.ok(q.some((x) => /legally authorized/.test(x)), 'work authorization box goes to Questions');
+  assert.ok(q.some((x) => /will not require visa sponsorship/.test(x)), 'a negated statement goes to Questions');
+  assert.ok(!q.some((x) => /marketing/.test(x)), 'an optional marketing box is just left alone');
+  await page.close();
+});
+
+test('company form: Submit counts only a confirmation that newly appears', async () => {
+  const fixture = fs.readFileSync(path.join(FIX, 'ats-confirm.html'));
+  const run = async (mode) => {
+    const page = await browser.newPage();
+    // the "site" is the local fixture: nothing leaves the machine
+    await page.route('https://boards.greenhouse.io/**', (r) => r.fulfill({ contentType: 'text/html', body: fixture }));
+    const job = { url: `https://boards.greenhouse.io/acme/jobs/1?mode=${mode}`, title: 'Software Engineer Intern', company: 'Acme' };
+    const res = await ats.apply(page, job, { bank, submit: true, docs: { resume: resumePdf }, confirmTimeout: 1000 });
+    const clicks = await page.evaluate(() => window.__clicks);
+    await page.close();
+    return { res, clicks };
+  };
+  const [ok, silent, errors] = await Promise.all([run('ok'), run('silent'), run('errors')]);
+  assert.equal(ok.res.status, 'submitted', ok.res.note);
+  assert.equal(ok.res.resumeUsed, 'Jane_Resume.pdf');
+  // "Thank you for your interest" was in the posting before the click
+  assert.equal(silent.res.status, 'needs_review', 'never "submitted" without a confirmation');
+  assert.equal(silent.res.keepTab, true);
+  assert.equal(silent.res.note, 'clicked Submit but did not see a confirmation; check the tab');
+  assert.ok(silent.clicks >= 1);
+  assert.equal(errors.res.status, 'needs_answer');
+  assert.deepEqual(errors.res.unknowns.map((u) => u.question), ['Phone'], 'the flagged field, not "This field is required."');
+});
+
+test('LinkedIn resume: the exact file is picked and read back, or the window is left for you', async () => {
+  const run = async (id, query) => {
+    const page = await browser.newPage();
+    const job = { source: 'linkedin', jobId: id, url: `${base}/jobs/view/${id}/?${query}`, title: 'Frontend Engineer', company: 'Acme' };
+    await page.goto(job.url);
+    const res = await linkedin.apply(page, job, { bank, submit: true, docs: { resume: resumePdf }, resumeFile: 'Jane_Resume.pdf' });
+    const sent = await page.evaluate(() => window.__sent);
+    const open = await page.getByRole('dialog').isVisible().catch(() => false);
+    await page.close();
+    return { res, sent, open };
+  };
+  const [similar, missing] = await Promise.all([run('4100000128', 'similar=1'), run('4100000129', 'missing=1')]);
+  assert.equal(similar.res.status, 'submitted', similar.res.note);
+  assert.equal(similar.sent.resume, 'Jane_Resume.pdf', 'not Jane_Resume_ML.pdf, which starts the same');
+  assert.equal(similar.res.resumeUsed, 'Jane_Resume.pdf');
+  assert.equal(missing.res.status, 'needs_review');
+  assert.equal(missing.res.keepTab, true);
+  assert.match(missing.res.note, /couldn't confirm the right resume is attached; check before sending/);
+  assert.equal(missing.sent, null, 'nothing was sent');
+  assert.equal(missing.open, true, 'the Easy Apply window is left open on the resume step');
+});
+
+test('Handshake Quick apply: the exact resume, and "applied on" in the posting is not a confirmation', async () => {
+  const run = async (id, mode) => {
+    const page = await browser.newPage();
+    const job = { source: 'handshake', jobId: id, url: `${base}/job-search/${id}?mode=${mode}`, title: 'Software Engineer Intern', company: 'Acme' };
+    await page.goto(job.url);
+    const res = await handshake.apply(page, job, { bank, submit: true, docs: { resume: resumePdf }, confirmTimeout: 1000 });
+    const out = { res, sent: await page.evaluate(() => window.__sent), clicks: await page.evaluate(() => window.__clicks) };
+    await page.close();
+    return out;
+  };
+  const [ok, silent] = await Promise.all([run('9100001', 'ok'), run('9100002', 'silent')]);
+  assert.equal(ok.res.status, 'submitted', ok.res.note);
+  assert.equal(ok.sent.resume, 'Jane_Resume.pdf', 'swapped out Jane_Resume_ML.pdf, which starts the same');
+  assert.equal(ok.res.resumeUsed, 'Jane_Resume.pdf');
+  assert.equal(silent.clicks, 1, 'Submit was pressed once');
+  assert.equal(silent.res.status, 'needs_review', 'never "submitted" without a confirmation');
+  assert.equal(silent.res.keepTab, true);
+  assert.equal(silent.res.note, 'clicked Submit but did not see a confirmation; check the tab');
 });

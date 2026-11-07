@@ -1,0 +1,31 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Software Engineer Intern at Acme</title></head>
+<body>
+<h1 class="app-title">Software Engineer Intern</h1>
+<!-- the posting itself already says "Thank you" -->
+<div id="content"><p>We build tools for small shops.</p><p>Thank you for your interest in Acme!</p></div>
+<form id="application_form" novalidate>
+  <div class="field"><label for="first_name">First Name *</label><input id="first_name" name="first_name" type="text" required></div>
+  <div class="field"><label for="last_name">Last Name *</label><input id="last_name" name="last_name" type="text" required></div>
+  <div class="field"><label for="email">Email *</label><input id="email" name="email" type="email" required></div>
+  <div class="field"><label>Resume/CV *</label><input id="resume" name="resume" type="file" accept=".pdf,.docx"></div>
+  <div class="field"><label for="phone">Phone</label><input id="phone" name="phone" type="tel"><p class="error-text" id="phone-error"></p></div>
+  <button type="submit">Submit Application</button>
+</form>
+<script>
+  // ?mode=ok      the site confirms: the form goes away and a thank-you shows
+  // ?mode=silent  the site rejects it without a message (nothing changes)
+  // ?mode=errors  the site flags the Phone field
+  const mode = new URLSearchParams(location.search).get('mode');
+  window.__clicks = 0;
+  document.getElementById('application_form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    window.__clicks++;
+    if (mode === 'ok') {
+      document.getElementById('application_form').remove();
+      const h = document.createElement('h2'); h.textContent = 'Thank you for applying!'; document.body.appendChild(h);
+    }
+    if (mode === 'errors') document.getElementById('phone-error').textContent = 'This field is required.';
+  });
+</script>
+</body></html>

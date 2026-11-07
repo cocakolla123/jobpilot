@@ -34,15 +34,43 @@ export function workspacePaths(dir = defaultWorkspaceDir()) {
 }
 
 // ---- JSON helpers (atomic writes: a crash never leaves a half-written file) --
+// Files that could not be read because of a typo (usually a hand edit). Each
+// one was copied aside first, so the next save can never lose what was in it.
+const brokenFiles = [];
+export const brokenJsonFiles = () => brokenFiles.map(({ file, savedAs, error }) => ({ file, savedAs, error }));
+
 export function readJson(p, fallback) {
-  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return fallback; }
+  let text;
+  try { text = fs.readFileSync(p, 'utf8'); } catch { return fallback; }   // not created yet
+  if (!text.trim()) return fallback;
+  try {
+    return JSON.parse(text.replace(/^\uFEFF/, ''));
+  } catch (e) {
+    // the dashboard reads these files every few seconds, so copy each broken version once
+    const known = brokenFiles.find((b) => b.file === p && b.text === text);
+    if (!known) {
+      const keep = `${p}.broken-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+      try { fs.writeFileSync(keep, text); } catch { /* still return the fallback */ }
+      brokenFiles.push({ file: p, savedAs: keep, text, error: String(e.message || e).split('\n')[0] });
+      console.warn(`JobPilot: ${path.basename(p)} has a typo and could not be read (${e.message}). A copy was saved as ${path.basename(keep)}.`);
+    }
+    return fallback;
+  }
 }
+
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 export function writeJson(p, data) {
   fs.mkdirSync(path.dirname(p), { recursive: true });
   const tmp = `${p}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n');
-  fs.renameSync(tmp, p);
+  // Windows antivirus or search indexing can hold the file for a moment
+  for (let i = 0; ; i++) {
+    try { fs.renameSync(tmp, p); return; } catch (e) {
+      if (i >= 8 || !['EPERM', 'EBUSY', 'EACCES'].includes(e.code)) { try { fs.rmSync(tmp, { force: true }); } catch { /* gone */ } throw e; }
+      sleepSync(100 * (i + 1));
+    }
+  }
 }
 
 export const DEFAULT_SETTINGS = {
@@ -66,6 +94,8 @@ export const DEFAULT_SETTINGS = {
   // an AI answer to review, no confirmation) stay open; the run pauses once
   // this many are waiting.
   maxOpenTabs: 8,
+  // The job sites you use. Searches, Apply and the account check skip the rest.
+  sites: ['linkedin', 'handshake', 'indeed'],
   // AI answers for open-ended questions only, off until you switch it on.
   // provider 'claude-code' uses your Claude Code sign-in (your Claude plan),
   // 'api' uses an Anthropic API key. autoSubmit false: fill the AI answer and
@@ -73,14 +103,34 @@ export const DEFAULT_SETTINGS = {
   ai: { enabled: false, provider: 'claude-code', model: 'opus', effort: 'low', autoSubmit: false },
 };
 
+const SITES = ['linkedin', 'handshake', 'indeed'];
+const num = (v, fallback, min, max) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+};
+
+/** Settings with defaults filled in and hand edited values kept in range, so a typo can't crash a run. */
+export function cleanSettings(s = {}) {
+  const d = DEFAULT_SETTINGS;
+  const out = { ...d, ...s };
+  const caps = { ...d.dailyCaps, ...(s.dailyCaps && typeof s.dailyCaps === 'object' ? s.dailyCaps : {}) };
+  out.dailyCaps = Object.fromEntries(Object.entries(caps).map(([k, v]) => [k, num(v, d.dailyCaps[k] ?? 25, 0, 500)]));
+  const pause = Array.isArray(s.pauseSeconds) ? s.pauseSeconds : [s.pauseSeconds, s.pauseSeconds];
+  const lo = num(pause[0], d.pauseSeconds[0], 0, 600);
+  out.pauseSeconds = [lo, Math.max(lo, num(pause[1], d.pauseSeconds[1], 0, 600))];
+  out.maxOpenTabs = Math.round(num(s.maxOpenTabs, d.maxOpenTabs, 1, 50));
+  out.perSearchLimit = Math.round(num(s.perSearchLimit, d.perSearchLimit, 1, 200));
+  const port = Math.round(num(s.cdpPort, d.cdpPort, 0, 65535));
+  out.cdpPort = port === 0 || port >= 1024 ? port : d.cdpPort;
+  out.sites = Array.isArray(s.sites) ? SITES.filter((x) => s.sites.includes(x)) : d.sites.slice();
+  for (const k of ['excludeCompanies', 'excludeTitleWords']) out[k] = Array.isArray(s[k]) ? s[k].map(String) : (typeof s[k] === 'string' ? s[k].split(',').map((x) => x.trim()).filter(Boolean) : d[k].slice());
+  for (const k of ['submit', 'saveOnSite', 'skipSenior', 'autoSyncResumes']) out[k] = s[k] === undefined ? d[k] : s[k] === true || s[k] === 'true';
+  out.ai = { ...d.ai, ...(s.ai && typeof s.ai === 'object' ? s.ai : {}) };
+  return out;
+}
+
 export function loadSettings(ws) {
-  const s = readJson(ws.settings, {});
-  return {
-    ...DEFAULT_SETTINGS,
-    ...s,
-    dailyCaps: { ...DEFAULT_SETTINGS.dailyCaps, ...(s.dailyCaps || {}) },
-    ai: { ...DEFAULT_SETTINGS.ai, ...(s.ai || {}) },
-  };
+  return cleanSettings(readJson(ws.settings, {}));
 }
 
 export function saveSettings(ws, patch = {}) {
@@ -88,8 +138,9 @@ export function saveSettings(ws, patch = {}) {
   const next = { ...cur, ...patch };
   if (patch.ai) next.ai = { ...cur.ai, ...patch.ai };
   if (patch.dailyCaps) next.dailyCaps = { ...cur.dailyCaps, ...patch.dailyCaps };
-  writeJson(ws.settings, next);
-  return next;
+  const clean = cleanSettings(next);
+  writeJson(ws.settings, clean);
+  return clean;
 }
 
 /** Creates the workspace on first run and copies the starter files in. */

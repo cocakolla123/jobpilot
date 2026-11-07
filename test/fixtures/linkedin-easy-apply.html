@@ -8,7 +8,11 @@
   <button id="easy" class="jobs-apply-button">Easy Apply</button>
 </main>
 <script>
-  const unknown = new URLSearchParams(location.search).has('unknown');
+  const params = new URLSearchParams(location.search);
+  const unknown = params.has('unknown');
+  // ?similar=1: a longer name that starts the same comes first; ?missing=1: the wanted file is not there
+  const resumes = params.has('missing') ? ['Old_Resume.pdf', 'Jane_Resume_ML.pdf']
+    : params.has('similar') ? ['Old_Resume.pdf', 'Jane_Resume_ML.pdf', 'Jane_Resume.pdf'] : ['Old_Resume.pdf', 'Jane_Resume.pdf'];
   const state = {};
   window.__sent = null;
   window.__saved = false;
@@ -21,8 +25,7 @@
       <div class="fb-dash-form-element"><label for="ph">Mobile phone number</label><input id="ph" type="text" required></div>
       <button aria-label="Continue to next step">Next</button>`,
     () => `<h3>Resume</h3>
-      <div class="jobs-document-upload-redesign-card__container"><label><input type="radio" name="res" value="Old_Resume.pdf" checked> Old_Resume.pdf</label></div>
-      <div class="jobs-document-upload-redesign-card__container"><label><input type="radio" name="res" value="Jane_Resume.pdf"> Jane_Resume.pdf</label></div>
+      ${resumes.map((f, i) => `<div class="jobs-document-upload-redesign-card__container"><label><input type="radio" name="res" value="${f}"${i === 0 ? ' checked' : ''}> ${f}</label></div>`).join('\n      ')}
       <button aria-label="Continue to next step">Next</button>`,
     () => `<h3>Additional questions</h3>
       <div class="fb-dash-form-element"><label for="yrs">How many years of work experience do you have with React?</label><input id="yrs" type="text" required></div>

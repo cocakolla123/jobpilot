@@ -57,16 +57,26 @@ export function skillInQuestion(question) {
 export const YEARS_Q = /how many years.*(experience|worked|using|with|in)|years of (work |professional |hands on )?experience (with|in|using|doing)|years.*experience.*\?/i;
 export const HAVE_Q = /(do|have) you (have )?(any |professional |hands on )?(experience|worked|familiar|proficient|knowledge) (with|in|using)|are you (familiar|comfortable|proficient) with/i;
 
+/** True for "How many years with X?" / "Do you have experience with X?" about one known skill. */
+export function isSkillQuestion(question) {
+  return !!skillInQuestion(question) && (YEARS_Q.test(question) || HAVE_Q.test(question));
+}
+
 /**
  * Answer for a skill question from profile.skills ([{name, years}]).
- * Returns null when the question is not about one known skill.
+ * Returns null when the question is not about one known skill, and when no
+ * skills are saved yet (then "0 years" or "No" would be a guess).
  */
 export function skillAnswer(question, profileSkills = []) {
+  if (!Array.isArray(profileSkills) || !profileSkills.length) return null;
   const skill = skillInQuestion(question);
   if (!skill) return null;
   const mine = profileSkills.find((s) => String(s.name).toLowerCase() === skill.toLowerCase());
   if (YEARS_Q.test(question)) {
-    const years = mine ? Math.max(0, Math.round(Number(mine.years) || 1)) : 0;
+    // 0 is a real answer; only a blank or unreadable number falls back to 1
+    const raw = mine?.years;
+    const y = raw === undefined || raw === null || String(raw).trim() === '' ? NaN : Number(raw);
+    const years = mine ? Math.max(0, Math.round(Number.isFinite(y) ? y : 1)) : 0;
     return { q: `years with ${skill}`, answer: String(years), options: [], source: 'skills' };
   }
   if (HAVE_Q.test(question)) {

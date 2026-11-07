@@ -6,16 +6,16 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { APP_DIR, loadSettings, saveSettings, readJson, writeJson } from './core/config.mjs';
+import { APP_DIR, brokenJsonFiles, loadSettings, saveSettings, readJson, writeJson } from './core/config.mjs';
 import { loadJobs, updateJob, removeJob, jobKey } from './core/jobs.mjs';
-import { readSheet, appendRow, ensureSheet, HEADER } from './core/sheet.mjs';
+import { readSheet, appendRowSafe, ensureSheet, HEADER } from './core/sheet.mjs';
 import { listResumes, RESUME_EXT } from './core/resumes.mjs';
 import { buildMatcher, resumeTags } from './core/matcher.mjs';
-import { PROFILE_FIELDS, addAnswer, profileAnswers } from './core/answers.mjs';
+import { PROFILE_FIELDS, PROFILE_LISTS, addAnswer, normalizeProfile, profileAnswers } from './core/answers.mjs';
 import { extractSkills } from './core/skills.mjs';
 import { readQueue, resolveQuestion } from './core/review.mjs';
-import { findChrome, launchChrome, ownChromePort } from './core/chrome.mjs';
-import { Runner, SOURCES, PLATFORMS } from './runner.mjs';
+import { findChrome, friendlyError, launchChrome, ownChromePort } from './core/chrome.mjs';
+import { Runner, SOURCES, PLATFORMS, releaseStuckJobs } from './runner.mjs';
 import { loadSync } from './core/resumeSync.mjs';
 import { AI_MODELS, AI_PROVIDERS, aiSettings, keyStatus, saveApiKey, removeApiKey, draftAnswer, claudeCodeStatus } from './core/ai.mjs';
 
@@ -41,6 +41,9 @@ function readBody(req) {
 
 export async function startServer(ws, { port = 4123 } = {}) {
   const runner = new Runner(ws);
+  // after a crash or Ctrl+C: jobs caught mid application wait for you, and no tab from before is open anymore
+  releaseStuckJobs(ws);
+  for (const j of loadJobs(ws)) if (j.tabOpen) updateJob(ws, jobKey(j), { tabOpen: false });
   const clients = new Set();
   const history = [];
   let lastCheck = readJson(path.join(ws.dir, '.cache', 'account-check.json'), null);
@@ -77,7 +80,8 @@ export async function startServer(ws, { port = 4123 } = {}) {
       const profile = readJson(ws.profile, {});
       const resumes = fs.existsSync(ws.resumes) ? fs.readdirSync(ws.resumes).filter((f) => RESUME_EXT.test(f)) : [];
       return {
-        workspace: ws.dir, sources: SOURCES.map((s) => ({ id: s, label: PLATFORMS[s].label })), settings, runner: runner.state,
+        workspace: ws.dir, sources: SOURCES.map((s) => ({ id: s, label: PLATFORMS[s].label })), settings, runner: { ...runner.state, waitingTabs: runner.waitingTabs().size },
+        warnings: brokenJsonFiles().map((b) => `${path.basename(b.file)} had a typo and could not be read, so it started empty. Your old copy is saved as ${path.basename(b.savedAs)}.`),
         counts, totalJobs: jobs.length, questions: readQueue(ws).length,
         chrome: { found: !!findChrome(), running: !!(await ownChromePort(ws)) },
         setup: {
@@ -90,8 +94,16 @@ export async function startServer(ws, { port = 4123 } = {}) {
         log: history.slice(-200),
       };
     },
-    'GET /api/profile': async () => ({ profile: readJson(ws.profile, {}), fields: PROFILE_FIELDS.map(([key, label, kind, options]) => ({ key, label, kind, options: options || null })) }),
-    'PUT /api/profile': async (b) => { const cur = readJson(ws.profile, {}); const next = { ...cur, ...(b.profile || {}) }; writeJson(ws.profile, next); return { profile: next, answers: profileAnswers(next).length }; },
+    'GET /api/profile': async () => ({
+      profile: normalizeProfile(readJson(ws.profile, {})),
+      fields: PROFILE_FIELDS.map(([key, label, kind, options]) => ({ key, label, kind, options: options || null })),
+      lists: PROFILE_LISTS.map((l) => ({ ...l, fields: l.fields.map(([key, label, kind, options]) => ({ key, label, kind, options: options || null })) })),
+    }),
+    'PUT /api/profile': async (b) => {
+      const next = normalizeProfile({ ...readJson(ws.profile, {}), ...(b.profile || {}) });
+      writeJson(ws.profile, next);
+      return { profile: next, answers: profileAnswers(next).length };
+    },
     'POST /api/skills/scan': async () => {
       const list = await listResumes(ws);
       const found = [...new Set(list.flatMap((r) => extractSkills(r.text)))];
@@ -152,20 +164,27 @@ export async function startServer(ws, { port = 4123 } = {}) {
     },
     'POST /api/jobs/update': async (b) => {
       const patch = Object.fromEntries(Object.entries(b.patch || {}).filter(([k]) => ['status', 'resume', 'note'].includes(k)));
-      if (patch.status) patch.tabOpen = false;
       const before = loadJobs(ws).find((j) => jobKey(j) === b.key);
-      const job = updateJob(ws, b.key, patch);
-      // "I submitted it" from the dashboard goes into the sheet too
-      if (job && patch.status === 'submitted' && before?.status !== 'submitted') {
-        ensureSheet(ws.sheet);
-        appendRow(ws.sheet, {
-          timestamp: new Date().toISOString(), source: job.applyType === 'external' ? 'ats' : job.source, job_id: job.jobId || '',
-          title: job.title, company: job.company, location: job.location || '', job_url: job.url, apply_url: job.externalUrl || '',
-          resume: job.appliedWith || job.resume || '', match_score: job.score ?? '', status: 'submitted', notes: 'you finished it in the open tab',
-        });
+      if (!before) throw new Error('That job is no longer on the list. Refresh the page.');
+      if (patch.status) {
+        if (runner.state.task === 'apply' && before.status === 'applying') throw new Error('JobPilot is applying to this one right now. Wait a moment, then try again.');
+        patch.tabOpen = false;
+        await runner.closeTabFor(b.key);
       }
-      return job;
+      // Retry: another real try, even if it was filled in before (only a sent one is never repeated)
+      if (patch.status === 'saved') { patch.retry = true; patch.note = patch.note ?? 'you pressed Retry'; }
+      // "I sent it" goes into the sheet first, so a locked file can't leave it half recorded
+      if (patch.status === 'submitted' && before.status !== 'submitted') {
+        const res = appendRowSafe(ws.sheet, path.join(ws.dir, '.cache', 'pending-rows.json'), {
+          timestamp: new Date().toISOString(), source: before.applyType === 'external' ? 'ats' : before.source, job_id: before.jobId || '',
+          title: before.title, company: before.company, location: before.location || '', job_url: before.url, apply_url: before.externalUrl || '',
+          resume: before.appliedWith || before.resume || '', match_score: before.score ?? '', status: 'submitted', notes: 'you sent it yourself',
+        });
+        if (!res.ok) patch.note = 'marked sent; it will be added to applications.csv once the file is free (close it in Excel)';
+      }
+      return updateJob(ws, b.key, patch);
     },
+    'POST /api/jobs/show-tab': async (b) => ({ shown: await runner.showTab(b.key) }),
     'GET /api/ai': async () => ({ ...aiSettings(loadSettings(ws)), providers: AI_PROVIDERS, models: AI_MODELS, claudeCode: await claudeCodeStatus(), key: keyStatus(ws) }),
     'PUT /api/ai/key': async (b) => saveApiKey(ws, b?.apiKey),
     'POST /api/ai/key/remove': async () => removeApiKey(ws),
@@ -181,15 +200,21 @@ export async function startServer(ws, { port = 4123 } = {}) {
       const answer = await draftAnswer(ws, settings, { question: b.question || 'Why do you want to work here?', job, resumeText: best?.text || '', profile: readJson(ws.profile, {}) });
       return { answer: answer || '(the AI said this cannot be answered honestly from your resume)', provider: cfg.provider, model: cfg.model, resume: best?.file || null, ms: Date.now() - t0 };
     },
-    'POST /api/jobs/remove': async (b) => ({ removed: removeJob(ws, b.key) }),
+    'POST /api/jobs/remove': async (b) => { await runner.closeTabFor(b.key); return { removed: removeJob(ws, b.key) }; },
     'POST /api/review/answer': async (b) => {
       const q = readQueue(ws).find((e) => e.id === b.id);
       if (!q) throw new Error('question not found');
       const entry = addAnswer(ws, { question: q.question, answer: b.answer, type: b.type });
       resolveQuestion(ws, b.id);
-      // jobs that were waiting only on questions go back to "saved" so the next apply retries them
+      // jobs that were waiting only on questions go back to "saved" so the next apply retries them;
+      // a job you skipped or finished in its tab meanwhile is left alone
       const waiting = new Set(readQueue(ws).flatMap((e) => e.jobs.map((j) => j.key)));
-      for (const j of q.jobs) if (!waiting.has(j.key)) updateJob(ws, j.key, { status: 'saved', note: 'answered; ready to retry' });
+      const now = new Map(loadJobs(ws).map((j) => [jobKey(j), j]));
+      for (const j of q.jobs) {
+        if (waiting.has(j.key) || now.get(j.key)?.status !== 'needs_answer') continue;
+        await runner.closeTabFor(j.key);
+        updateJob(ws, j.key, { status: 'saved', note: 'answered; ready to retry', retry: true, tabOpen: false });
+      }
       return entry;
     },
     'POST /api/review/dismiss': async (b) => resolveQuestion(ws, b.id),
@@ -236,7 +261,7 @@ export async function startServer(ws, { port = 4123 } = {}) {
         const body = req.method === 'GET' ? null : await readBody(req);
         return send(res, 200, await route(body));
       } catch (e) {
-        return send(res, 400, { error: String(e.message || e) });
+        return send(res, 400, { error: friendlyError(e) });
       }
     }
     // static UI

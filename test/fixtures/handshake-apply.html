@@ -1,0 +1,45 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Handshake</title>
+<style>[role=dialog]{border:1px solid #999;padding:12px;margin:12px;max-width:520px}</style></head>
+<body>
+<main>
+  <h1>Software Engineer Intern</h1>
+  <!-- the posting already says "applied on" -->
+  <p>Students who applied on time last year got an interview within two weeks.</p>
+  <button id="apply">Quick Apply</button>
+</main>
+<script>
+  // like Handshake: the Quick apply window starts with the last resume used,
+  // which here is a longer name that starts the same as the wanted one.
+  // ?mode=silent: Submit is pressed but Handshake never confirms.
+  const mode = new URLSearchParams(location.search).get('mode') || 'ok';
+  const library = ['Jane_Resume_ML.pdf', 'Jane_Resume.pdf', 'Old_Resume.pdf'];
+  let attached = 'Jane_Resume_ML.pdf';
+  let dlg = null;
+  window.__sent = null;
+  window.__clicks = 0;
+  function render() {
+    dlg.innerHTML = `<h2>Apply to Acme</h2>
+      <section><div>Attach your resume</div>
+        ${attached
+          ? `<div class="doc">${attached} <button type="button" aria-label="Close">x</button></div>`
+          : `<input type="search" placeholder="Search your documents"><ul>${library.map((f) => `<li role="option"><button type="button" data-f="${f}">${f}</button></li>`).join('')}</ul>`}
+      </section>
+      <button type="button" id="submit">Submit Application</button>`;
+    dlg.querySelector('[aria-label=Close]')?.addEventListener('click', () => { attached = null; render(); });
+    dlg.querySelectorAll('[data-f]').forEach((b) => b.addEventListener('click', () => { attached = b.dataset.f; render(); }));
+    dlg.querySelector('#submit').addEventListener('click', () => {
+      window.__clicks++;
+      if (mode === 'silent') return;
+      window.__sent = { resume: attached };
+      dlg.innerHTML = '<p>Application submitted</p>';
+    });
+  }
+  document.getElementById('apply').onclick = () => {
+    dlg = document.createElement('div');
+    dlg.setAttribute('role', 'dialog');
+    document.body.appendChild(dlg);
+    render();
+  };
+</script>
+</body></html>

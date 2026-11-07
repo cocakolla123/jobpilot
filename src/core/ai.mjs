@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, execFile, execFileSync } from 'node:child_process';
+import { normalizeProfile } from './answers.mjs';
 
 export const AI_PROVIDERS = [
   { id: 'claude-code', label: 'My Claude Code sign-in (uses my Claude plan, no API key)' },
@@ -34,7 +35,7 @@ export function findClaude() {
   if (env && fs.existsSync(env)) return env;
   const home = os.homedir();
   const cands = process.platform === 'win32'
-    ? [path.join(process.env.APPDATA || '', 'npm', 'claude.cmd'), path.join(home, '.local', 'bin', 'claude.exe')]
+    ? [path.join(home, '.local', 'bin', 'claude.exe'), path.join(process.env.APPDATA || '', 'npm', 'claude.cmd')]
     : [path.join(home, '.local', 'bin', 'claude'), '/opt/homebrew/bin/claude', '/usr/local/bin/claude', path.join(home, '.claude', 'local', 'claude')];
   for (const c of cands) if (c && fs.existsSync(c)) return c;
   try {
@@ -44,6 +45,20 @@ export function findClaude() {
   return null;
 }
 
+/**
+ * How to start `claude` with these arguments. Node will not run a Windows .cmd
+ * file without a shell (and a shell would mangle the prompt), so for the npm
+ * install it runs Claude Code's own script with Node directly.
+ */
+export function claudeCommand(bin, args) {
+  if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(bin)) {
+    const cli = path.join(path.dirname(bin), 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js');
+    if (fs.existsSync(cli)) return { cmd: process.execPath, args: [cli, ...args], shell: false };
+    return { cmd: bin, args: args.map((a) => `"${String(a).replace(/"/g, '""')}"`), shell: true };
+  }
+  return { cmd: bin, args, shell: false };
+}
+
 // cached so the dashboard never waits on `claude --version` twice in a row
 let statusCache = { at: 0, value: null };
 export async function claudeCodeStatus() {
@@ -51,7 +66,8 @@ export async function claudeCodeStatus() {
   const bin = findClaude();
   let value = { found: false, path: null, version: null };
   if (bin) {
-    const version = await new Promise((resolve) => execFile(bin, ['--version'], { timeout: 8000, env: claudeEnv() }, (err, out) => resolve(err ? null : String(out).trim().split('\n')[0])));
+    const c = claudeCommand(bin, ['--version']);
+    const version = await new Promise((resolve) => execFile(c.cmd, c.args, { timeout: 8000, env: claudeEnv(), shell: c.shell, windowsHide: true }, (err, out) => resolve(err ? null : String(out).trim().split('\n')[0])));
     value = { found: true, path: bin, version };
   }
   statusCache = { at: Date.now(), value };
@@ -78,7 +94,8 @@ export function runClaudeCode(system, prompt, { model = 'opus', effort = 'low', 
     '--no-session-persistence', '--model', model, '--effort', effort, '--system-prompt', system,
   ];
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { cwd: dir, env: claudeEnv(), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    const c = claudeCommand(bin, args);
+    const child = spawn(c.cmd, c.args, { cwd: dir, env: claudeEnv(), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: c.shell });
     let out = '', err = '';
     const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('Claude Code took too long to answer.')); }, timeoutMs);
     child.stdout.on('data', (d) => { out += d; });
@@ -93,6 +110,9 @@ export function runClaudeCode(system, prompt, { model = 'opus', effort = 'low', 
       const why = (res && (res.result || res.error)) || err.trim() || out.trim() || `claude exited with code ${code}`;
       reject(Object.assign(new Error(String(why).split('\n')[0].slice(0, 300)), { claudeCode: true }));
     });
+    // if claude quits before reading (not signed in, an old version), writing
+    // the prompt fails with EPIPE; without this listener that crashes the server
+    child.stdin.on('error', () => {});
     child.stdin.end(prompt);
   });
 }
@@ -185,15 +205,21 @@ export function cleanDraft(text, maxChars = 0) {
   return t || null;
 }
 
-function profileSummary(p = {}) {
+function profileSummary(profile = {}) {
+  const p = normalizeProfile(profile);
+  const join = (...xs) => xs.filter(Boolean).join(', ');
   const lines = [
     [p.firstName, p.lastName].filter(Boolean).join(' '),
-    p.school && `School: ${p.school}${p.degree ? `, ${p.degree}` : ''}${p.major ? ` in ${p.major}` : ''}${p.gradYear ? `, ${[p.gradMonth, p.gradYear].filter(Boolean).join(' ')}` : ''}`,
-    p.currentTitle && `Current or recent role: ${p.currentTitle}${p.currentCompany ? ` at ${p.currentCompany}` : ''}`,
+    ...p.education.map((e) => `Education: ${join(e.school, e.degree && `${e.degree}${e.major ? ` in ${e.major}` : ''}`, !e.degree && e.major, [e.gradMonth, e.gradYear].filter(Boolean).join(' '))}`),
+    ...p.experience.map((x, i) => `${i ? 'Earlier role' : 'Current or most recent role'}: ${join([x.title, x.company && `at ${x.company}`].filter(Boolean).join(' '), [x.start, x.end].filter(Boolean).join(' to '))}${x.description ? `. ${x.description.slice(0, 400)}` : ''}`),
+    ...p.projects.map((x) => `Project: ${x.name}${x.description ? `. ${x.description.slice(0, 300)}` : ''}`),
+    p.certifications.length && `Certifications: ${p.certifications.map((c) => c.name).join(', ')}`,
+    ...p.links.map((l) => `Link: ${[l.label, l.url].filter(Boolean).join(' ')}`),
     [p.city, p.state].filter(Boolean).length && `Location: ${[p.city, p.state].filter(Boolean).join(', ')}`,
     p.aboutMe && `In their own words: ${String(p.aboutMe).slice(0, 1200)}`,
   ];
-  return lines.filter(Boolean).join('\n');
+  // a long profile must not crowd out the job posting or overflow the prompt
+  return lines.filter(Boolean).join('\n').slice(0, 6000);
 }
 
 // Opus 5.x, Sonnet 5.5 and Fable take Anthropic's automatic fallback when a
@@ -257,7 +283,7 @@ export function makeDrafter(ws, settings, { job, resumeText, profile, log = () =
       return text;
     } catch (e) {
       const status = e?.status;
-      if (status === 401 || status === 403 || /credit|billing|api key|authentication|not (logged|signed) in|log ?in|usage limit|rate limit|not installed|ENOENT/i.test(String(e?.message))) {
+      if (status === 401 || status === 403 || /credit|billing|api key|authentication|not (logged|signed) in|log ?in|usage limit|rate limit|not installed|ENOENT|EINVAL|EPIPE|EACCES|spawn/i.test(String(e?.message))) {
         state.disabled = true;
         log(`AI answers are off for this run: ${String(e.message || e).split('\n')[0].slice(0, 160)}`);
       } else {

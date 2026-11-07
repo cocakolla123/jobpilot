@@ -2,7 +2,9 @@
 // Indeed's bot protection is strict, so this source is the most careful:
 // any security page stops Indeed for the run, and the daily cap is low.
 import { assertNoWall, detectCaptcha, SecurityStop, sleep } from '../core/safety.mjs';
-import { fillAll, attachFiles, dedupeUnknowns } from '../core/forms.mjs';
+import { fillAll, attachFiles, dedupeUnknowns, beforeSubmit, submitConfirmed, selectResumeCard, NOT_CONFIRMED, RESUME_UNCONFIRMED } from '../core/forms.mjs';
+
+const SENT_RE = /application (has been )?submitted|your application has been sent/i;
 
 export const source = 'indeed';
 export const label = 'Indeed';
@@ -99,20 +101,30 @@ export async function apply(page, job, ctx) {
   await form.waitForLoadState('domcontentloaded', { timeout: 20000 }).catch(() => {});
   await sleep(3000);
   const drafted = [];
+  let resumeUsed = null;
   // Indeed Apply may open its own tab: that tab is the one to leave open
-  const keep = (status, note, extra = {}) => ({ status, note, drafted, keepTab: true, formPage: opened || null, ...extra });
+  const keep = (status, note, extra = {}) => ({ status, note, drafted, resumeUsed, keepTab: true, formPage: opened || null, ...extra });
   const done = async (res) => { if (opened) await opened.close().catch(() => {}); return res; };
+  const wantFile = ctx.resumeFile || String(ctx.docs.resume || '').split(/[\\/]/).pop();
   for (let step = 0; step < 15; step++) {
     if (await detectCaptcha(form)) throw new SecurityStop('Indeed: a captcha appeared in Indeed Apply. Finish it yourself in the browser.', source);
-    if (/smartapply\.indeed\.com\/.*(post-apply|confirmation)|application (has been )?submitted/i.test(form.url() + ' ' + (await form.locator('h1').first().innerText().catch(() => '')))) {
-      return done({ status: 'submitted', note: '', drafted });
+    const heading = await form.locator('h1').first().innerText().catch(() => '');
+    if (/smartapply\.indeed\.com\/.*(post-apply|confirmation)|application (has been )?submitted/i.test(form.url() + ' ' + heading)) {
+      return done({ status: 'submitted', note: '', drafted, resumeUsed });
     }
     const root = form.locator('main, form, body').first();
-    await attachFiles(root, { resume: ctx.docs.resume, coverLetter: ctx.docs.coverLetter });
-    // the resume step lists uploaded resumes as cards; pick the matching one
-    const want = ctx.resumeFile.replace(/\.(pdf|docx)$/i, '');
-    const card = form.locator(`[data-testid*="resume" i]:has-text("${want}"), label:has-text("${want}")`).first();
-    if (await card.isVisible({ timeout: 500 }).catch(() => false)) await card.click().catch(() => {});
+    const attached = await attachFiles(root, { resume: ctx.docs.resume, coverLetter: ctx.docs.coverLetter });
+    // the resume step lists resumes as cards: select exactly this job's file
+    // and read back which one is selected (Indeed holds one file, and putting
+    // this job's resume there can fail)
+    const picked = await selectResumeCard(root, wantFile);
+    const resumeStep = picked.state !== 'none' || /\/resume\b|resume-selection|resume-module/i.test(form.url()) || /\b(add|choose|select|upload) (a |your )?(resume|cv)\b/i.test(heading);
+    if (picked.state === 'ok') resumeUsed = picked.used;
+    else if (attached.includes('resume') && picked.state === 'none') resumeUsed = String(ctx.docs.resume).split(/[\\/]/).pop();
+    else if (resumeStep) {
+      const shown = picked.used ? ` (Indeed shows ${picked.used} selected)` : '';
+      return keep('needs_review', `${RESUME_UNCONFIRMED}; it should be ${wantFile}${shown}`, { resumeUsed: picked.used || null });
+    }
     const unknowns = [];
     await fillAll(form, root, ctx.bank, unknowns, { draft: ctx.draft, drafted });
     const blocking = dedupeUnknowns(unknowns).filter((u) => u.required);
@@ -121,10 +133,11 @@ export async function apply(page, job, ctx) {
     if (await submit.isVisible({ timeout: 800 }).catch(() => false)) {
       if (!ctx.submit) return keep('filled_not_submitted', 'filled; review and submit in the open tab (submit is off)');
       if (drafted.length && !ctx.aiAutoSubmit) return keep('needs_review', `AI wrote ${drafted.length} answer(s); read them in the open tab and submit`);
+      const before = await beforeSubmit(form, submit, SENT_RE);
       await submit.click({ timeout: 8000 });
       await sleep(4000);
-      const ok = await form.getByText(/application (has been )?submitted|your application has been sent/i).first().isVisible({ timeout: 10000 }).catch(() => false);
-      return ok ? done({ status: 'submitted', note: '', drafted }) : keep('submitted', 'Submit was pressed but Indeed showed no confirmation; check the open tab');
+      const ok = await submitConfirmed(form, before, { re: SENT_RE, submit, timeout: ctx.confirmTimeout ?? 10000 });
+      return ok ? done({ status: 'submitted', note: '', drafted, resumeUsed }) : keep('needs_review', NOT_CONFIRMED);
     }
     const next = form.locator('button').filter({ hasText: /^\s*(continue|next|review( your application)?)\s*$/i }).first();
     if (!await next.isVisible({ timeout: 1500 }).catch(() => false)) return keep('error', 'Indeed Apply page had no Continue or Submit button; it is open in its tab');

@@ -150,7 +150,7 @@ function normalizeLabel(s) {
     .toLowerCase()
     .replace(/\((optional|required)\)/g, ' ')
     .replace(/\b(required|optional)$/g, ' ')
-    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -164,7 +164,7 @@ const STATUS = {
   saved: { label: 'Saved', tone: 'blue', tip: 'Found by a search and waiting for you to apply.' },
   applying: { label: 'Applying', tone: 'violet', tip: 'JobPilot is working on this one right now.' },
   needs_answer: { label: 'Needs an answer', tone: 'amber', tip: 'A form asked something new. Answer it on the Questions tab.' },
-  needs_review: { label: 'Review AI answer', tone: 'amber', tip: 'AI wrote an answer and filled the form. Read it in the open tab, then submit it yourself.' },
+  needs_review: { label: 'Check and send', tone: 'amber', tip: 'The form is filled in its open tab. Something needs your eyes first (an AI answer to read, or JobPilot could not confirm the resume or the submit). Check it, then send it yourself.' },
   submitted: { label: 'Submitted', tone: 'green', tip: 'The application was sent.' },
   filled_not_submitted: { label: 'Filled, not sent', tone: 'teal', tip: 'The form was filled in but not sent, because Submit is off.' },
   external_manual: { label: 'Apply on company site', tone: 'purple', tip: 'This job uses a company site JobPilot cannot fill. Open it and apply yourself.' },
@@ -181,18 +181,40 @@ const STATUS = {
 const JOB_FILTERS = ['saved', 'needs_answer', 'needs_review', 'submitted', 'filled_not_submitted', 'external_manual', 'skipped', 'duplicate', 'blocked', 'error'];
 // statuses where JobPilot leaves the job's tab open for you to finish
 const WAITING_STATUSES = new Set(['needs_review', 'filled_not_submitted', 'needs_answer', 'blocked', 'error']);
-const CAN_MARK_SUBMITTED = new Set(['needs_review', 'needs_answer', 'filled_not_submitted', 'error']);
+// "I sent it" / "I applied" works from any of these ("applying" too, when no run is active)
+const CAN_MARK_SUBMITTED = new Set(['external_manual', 'blocked', 'saved', 'error', 'needs_answer', 'filled_not_submitted', 'needs_review']);
+const runIdle = () => !S.state?.runner?.task;
+const canMarkSent = (j) => CAN_MARK_SUBMITTED.has(j.status) || (j.status === 'applying' && runIdle());
+const canRetry = (j) => !['saved', 'submitted', 'applying'].includes(j.status) || (j.status === 'applying' && runIdle());
+const canSkip = (j) => !['skipped', 'submitted'].includes(j.status) && (j.status !== 'applying' || runIdle());
+const sentLabel = (j) => (j.status === 'external_manual' || j.status === 'saved' ? 'I applied' : 'I sent it');
 
 const PROFILE_SECTIONS = [
   { id: 'personal', title: 'Personal & contact', keys: ['firstName', 'lastName', 'preferredName', 'pronouns', 'email', 'phone', 'address', 'city', 'state', 'zip', 'country'] },
   { id: 'links', title: 'Links', keys: ['linkedin', 'github', 'portfolio'] },
-  { id: 'education', title: 'Education', keys: ['school', 'degree', 'major', 'gpa', 'gradMonth', 'gradYear'] },
-  { id: 'work', title: 'Work', keys: ['currentCompany', 'currentTitle', 'yearsExperience', 'howHeard'] },
+  { id: 'work', title: 'Work details', keys: ['yearsExperience', 'howHeard'] },
   { id: 'auth', title: 'Work authorization & visa', keys: ['workAuthorized', 'needsSponsorship', 'visaStatus', 'over18'] },
   { id: 'availability', title: 'Availability & pay', keys: ['startDate', 'noticePeriod', 'salary', 'willingToRelocate', 'openToRemote', 'openToOnsite'] },
   { id: 'about', title: 'About you, for AI answers', keys: ['aboutMe'], note: 'Only used when AI answers are on in Settings. A few honest lines about what you are good at and the work you want next help the answers sound like you.' },
   { id: 'eeo', title: 'Voluntary self-identification', keys: ['gender', 'transgender', 'orientation', 'hispanic', 'race', 'veteran', 'disability'], note: 'Each of these is optional. Anything you leave blank is answered with "Decline to self-identify", and choosing that yourself is fine too.' },
 ];
+// Unlimited lists (education, experience, ...) go right after these sections.
+const LIST_AFTER = { links: ['education', 'experience'], availability: ['projects', 'certifications', 'links'] };
+const LIST_NOTES = {
+  education: 'Add every school, as many as you like. New ones go on top. Forms that ask for one school use the first, so keep your highest or most recent degree there.',
+  experience: 'Add every job, internship and contract, as many as you like. New ones go on top. Forms that ask for your current employer use the first, so keep your current or most recent one there.',
+  projects: 'Optional. AI answers can mention these when a question asks about your work.',
+  certifications: 'Used to answer questions like "List any certifications".',
+  links: 'Anything beyond LinkedIn, GitHub and your portfolio.',
+};
+const LIST_INPUT = {
+  start: { placeholder: 'For example Jun 2023' },
+  end: { placeholder: 'For example Aug 2025, or Present' },
+  startYear: { inputmode: 'numeric', placeholder: 'For example 2022' },
+  year: { inputmode: 'numeric', placeholder: 'For example 2026' },
+  url: { type: 'url', placeholder: 'https://' },
+  link: { type: 'url', placeholder: 'https://' },
+};
 const REQUIRED_FIELDS = ['firstName', 'lastName', 'email', 'phone', 'city', 'workAuthorized', 'needsSponsorship'];
 const EEO_FIELDS = new Set(PROFILE_SECTIONS.find((s) => s.id === 'eeo').keys);
 const FIELD_INPUT = {
@@ -251,16 +273,35 @@ const TABS = [
   { id: 'jobs', label: 'Jobs', icon: 'briefcase', group: 'Applying', load: loadJobsTab, render: renderJobs, fill: true },
   { id: 'questions', label: 'Questions', icon: 'help', group: 'Applying', load: loadQuestionsTab, render: renderQuestions },
   { id: 'sheet', label: 'Applications', icon: 'table', group: 'Applying', load: loadSheetTab, render: renderSheet, fill: true },
-  { id: 'answers', label: 'Answers', icon: 'list', group: 'Advanced', load: loadAnswersTab, render: renderAnswers },
+  { id: 'answers', label: 'Saved answers', icon: 'list', group: 'Advanced', load: loadAnswersTab, render: renderAnswers },
   { id: 'settings', label: 'Settings', icon: 'sliders', group: 'Advanced', load: loadSettingsTab, render: renderSettings },
 ];
 const TAB = Object.fromEntries(TABS.map((t) => [t.id, t]));
+// the save button of each editor tab, for "Save and continue"
+const SAVE_FN = { profile: () => saveProfile(), resumes: () => saveRules(), searches: () => saveSearches(), answers: () => saveAnswers(), settings: () => saveSettingsNow() };
 
 function siteLabel(id) {
   if (id === 'ats') return 'Company form';
   return S.state?.sources?.find((s) => s.id === id)?.label || cap(id);
 }
 const sources = () => S.state?.sources || [{ id: 'linkedin', label: 'LinkedIn' }, { id: 'handshake', label: 'Handshake' }, { id: 'indeed', label: 'Indeed' }];
+
+/** The job sites this person uses (Settings: sites). Every site when not set. */
+function chosenSiteIds() {
+  const all = sources().map((s) => s.id);
+  const pick = Array.isArray(S.state?.settings?.sites) ? S.state.settings.sites : S.localSites;
+  const list = Array.isArray(pick) ? all.filter((id) => pick.includes(id)) : [];
+  return list.length ? list : all;
+}
+const chosenSources = () => { const ids = chosenSiteIds(); return sources().filter((s) => ids.includes(s.id)); };
+
+/** Jobs that need the person: a question, a review, a form to send, a check or an error. Same count as the Jobs banner. */
+function needYouCount() {
+  const c = S.state?.counts || {};
+  let n = 0;
+  for (const s of WAITING_STATUSES) n += c[s] || 0;
+  return n;
+}
 
 // ======================================================================= API
 
@@ -313,13 +354,23 @@ function btn(label, { kind = '', icon: ic, onclick, disabled, size, tip, type = 
 function iconBtn(ic, label, onclick, { kind, disabled } = {}) {
   return h('button', { type: 'button', class: ['icon-btn', kind && `icon-btn-${kind}`], 'aria-label': label, 'data-tip': label, onclick, disabled }, icon(ic, 16));
 }
-/** Disables a button and shows a spinner while fn runs. */
+/** Disables a button and shows a spinner while fn runs. Keyboard focus comes back afterward. */
 async function busy(button, fn) {
   if (!button || button.classList.contains('is-busy')) return undefined;
   const was = button.disabled;
+  const hadFocus = document.activeElement === button;
+  const fk = button.closest('[data-focus-key]')?.dataset.focusKey;
+  const rk = button.closest('[data-row-key]')?.dataset.rowKey;
   button.disabled = true;
   button.classList.add('is-busy');
-  try { return await fn(); } finally { button.classList.remove('is-busy'); button.disabled = was; }
+  try { return await fn(); } finally {
+    button.classList.remove('is-busy'); button.disabled = was;
+    const now = document.activeElement;
+    if (hadFocus && (!now || now === document.body)) {
+      if (button.isConnected && !button.disabled) button.focus({ preventScroll: true });
+      else refocus(view, fk, rk);
+    }
+  }
 }
 const onBusy = (fn) => (e) => busy(e.currentTarget, () => fn(e));
 
@@ -354,7 +405,8 @@ function emptyState({ icon: ic = 'inbox', title, text, actions, small }) {
 function field(label, control, { hint, required, missing, wide, error } = {}) {
   const id = control.id || (control.id = nextId('f'));
   return h('div', { class: ['field', wide && 'field-wide', missing && 'is-missing'] },
-    h('label', { class: 'field-label', for: id }, label, required && h('span', { class: 'req-tag' }, 'Required')),
+    // the Required tag flows with the label text, so it never drops onto its own line
+    h('label', { class: 'field-label', for: id }, h('span', { class: 'field-label-text' }, label, required && h('span', { class: 'req-tag' }, 'Required'))),
     control,
     hint && h('p', { class: 'field-hint' }, hint),
     error && h('p', { class: 'field-error' }, error));
@@ -409,19 +461,60 @@ function makeDropTarget(el, onFiles) {
 // =================================================================== toasts
 
 const TOAST_ICON = { info: 'info', success: 'checkCircle', warn: 'alert', error: 'alert' };
-function toast(message, kind = 'info', { timeout } = {}) {
+const ANSI = /\u001b\[[0-9;]*[A-Za-z]/g;
+
+/**
+ * Splits a message into the plain first line and any technical leftovers
+ * (stack traces, "Call log:" dumps, terminal color codes), so people only
+ * see the part that makes sense to them.
+ */
+function splitTechnical(text) {
+  const raw = String(text ?? '');
+  const clean = raw.replace(ANSI, '');
+  const techy = clean !== raw || /Call log:|\n\s+at\s|\n\s*={3,}/.test(clean);
+  if (!techy) return [clean, ''];
+  let first = clean.split('\n').find((l) => l.trim()) || clean;
+  const cut = first.indexOf('Call log:');
+  if (cut > 0) first = first.slice(0, cut);
+  first = first.replace(/^\s*\w*Error:\s*/, '').trim();
+  return [cap(first) || 'Something went wrong.', clean.trim()];
+}
+
+function toast(message, kind = 'info', { timeout, action } = {}) {
   const box = $('#toasts');
   let timer;
+  let body = message;
+  let details = '';
+  let plain = typeof message === 'string' ? message : (message?.textContent || '');
+  if (typeof message === 'string') {
+    [body, details] = splitTechnical(message);
+    plain = body;
+  }
+  // errors about Chrome get a way to open it, unless Chrome is not installed at all
+  if (!action && kind === 'error' && /chrome/i.test(plain) && S.state?.chrome?.found !== false && !/not (found|installed)|install/i.test(plain)) {
+    action = { label: 'Open Chrome', onclick: () => openChrome() };
+  }
+  // the same message twice in a row only shows once
+  for (const t of box.querySelectorAll('.toast')) if (t.dataset.msg === plain) t.remove();
   const close = () => { clearTimeout(timer); el.classList.add('is-leaving'); setTimeout(() => el.remove(), 180); };
-  const el = h('div', { class: `toast toast-${kind}`, role: kind === 'error' ? 'alert' : 'status' },
+  const el = h('div', { class: `toast toast-${kind}`, role: kind === 'error' ? 'alert' : 'status', dataset: { msg: plain } },
     h('span', { class: 'toast-icon' }, icon(TOAST_ICON[kind] || 'info', 18)),
-    h('div', { class: 'toast-msg' }, message),
+    h('div', { class: 'toast-msg' },
+      h('div', null, body),
+      details && h('details', { class: 'toast-tech' }, h('summary', null, 'Technical details'), h('pre', null, details)),
+      action && h('div', { class: 'toast-actions' }, h('button', { type: 'button', class: 'btn btn-sm', onclick: () => { close(); action.onclick(); } }, action.label))),
     h('button', { type: 'button', class: 'toast-close', 'aria-label': 'Dismiss message', onclick: close }, icon('x', 14)));
   box.append(el);
   while (box.children.length > 4) box.firstElementChild.remove();
-  timer = setTimeout(close, timeout ?? (kind === 'error' ? 9000 : 5000));
-  el.addEventListener('mouseenter', () => clearTimeout(timer));
-  el.addEventListener('mouseleave', () => { timer = setTimeout(close, 2500); });
+  const wait = timeout ?? (kind === 'error' ? 9000 : action ? 8000 : 5000);
+  timer = setTimeout(close, wait);
+  const pause = () => clearTimeout(timer);
+  const resume = () => { clearTimeout(timer); if (!el.contains(document.activeElement)) timer = setTimeout(close, 2500); };
+  el.addEventListener('mouseenter', pause);
+  el.addEventListener('mouseleave', resume);
+  el.addEventListener('focusin', pause);
+  el.addEventListener('focusout', () => setTimeout(resume, 0));
+  return el;
 }
 
 // =================================================================== dialog
@@ -446,7 +539,34 @@ function confirmDialog({ title, body, ok = 'Continue', cancel = 'Cancel', danger
   });
 }
 
+/**
+ * A dialog with several labeled choices. Resolves to the chosen value, or
+ * to the value of the choice marked cancel when it is closed with Escape.
+ */
+function choiceDialog({ title, body, choices, icon: ic = 'info' }) {
+  const dlg = $('#dialog');
+  if (dlg.open) dlg.close();
+  const fallback = (choices.find((c) => c.cancel) || choices[choices.length - 1]).value;
+  return new Promise((resolve) => {
+    const buttons = choices.map((c) => h('button', { type: 'submit', value: c.value, class: ['btn', c.kind && `btn-${c.kind}`] }, c.label));
+    const parts = body == null ? [] : Array.isArray(body) ? body : [body];
+    dlg.replaceChildren(h('form', { method: 'dialog', class: 'dlg' },
+      h('div', { class: 'dlg-icon' }, icon(ic, 20)),
+      h('h2', { class: 'dlg-title', id: 'dlgTitle' }, title),
+      parts.length && h('div', { class: 'dlg-body' }, parts.map((p) => (typeof p === 'string' ? h('p', null, p) : p))),
+      h('div', { class: 'dlg-actions dlg-actions-3' }, buttons)));
+    dlg.setAttribute('aria-labelledby', 'dlgTitle');
+    dlg.returnValue = '';
+    dlg.addEventListener('close', () => resolve(dlg.returnValue || fallback), { once: true });
+    dlg.showModal();
+    buttons[0].focus();
+  });
+}
+
 // ================================================================== tooltip
+
+/** Hides the tooltip. Replaced by initTooltips with the real thing. */
+let hideTip = () => {};
 
 function initTooltips() {
   const tip = h('div', { class: 'tooltip', role: 'tooltip', 'aria-hidden': 'true' });
@@ -454,6 +574,7 @@ function initTooltips() {
   let cur = null;
   const place = () => {
     if (!cur) return;
+    if (!cur.isConnected) { hide(); return; }
     const r = cur.getBoundingClientRect();
     const tw = tip.offsetWidth; const th = tip.offsetHeight;
     let x = r.left + r.width / 2 - tw / 2;
@@ -468,10 +589,13 @@ function initTooltips() {
     if (!text) return;
     cur = el; tip.textContent = text; tip.classList.add('is-on'); place();
   };
-  const hide = () => { cur = null; tip.classList.remove('is-on'); };
+  function hide() { cur = null; tip.classList.remove('is-on'); }
+  hideTip = hide;
+  // a target that was re-rendered away leaves no tooltip behind
+  const dropIfGone = () => { if (cur && !cur.isConnected) hide(); };
   document.addEventListener('mouseover', (e) => {
     const el = e.target instanceof Element ? e.target.closest('[data-tip]') : null;
-    if (el && el !== cur) show(el); else if (!el && cur) hide();
+    if (el && el !== cur) show(el); else if (!el && cur) hide(); else dropIfGone();
   });
   document.addEventListener('focusin', (e) => {
     const el = e.target instanceof Element ? e.target.closest('[data-tip]') : null;
@@ -480,6 +604,103 @@ function initTooltips() {
   document.addEventListener('focusout', hide);
   document.addEventListener('scroll', hide, true);
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hide(); });
+  document.addEventListener('click', () => { requestAnimationFrame(dropIfGone); setTimeout(dropIfGone, 400); }, true);
+  window.addEventListener('hashchange', hide);
+  window.addEventListener('blur', hide);
+}
+
+// ===================================================== focus and menus
+
+/**
+ * Runs fn, which redraws part of the page, and puts keyboard focus back on
+ * the same control afterward. Controls are matched by data-focus-key; when
+ * that control is gone or disabled, focus goes to another control in the
+ * same row (data-row-key).
+ */
+function keepFocus(root, fn) {
+  const a = document.activeElement;
+  const inside = !!(root && a && a !== document.body && root.contains(a));
+  const fk = inside ? a.closest('[data-focus-key]')?.dataset.focusKey : null;
+  const rk = inside ? a.closest('[data-row-key]')?.dataset.rowKey : null;
+  const out = fn();
+  hideTip();
+  if (!inside || !root.isConnected) return out;
+  const now = document.activeElement;
+  if (now && now !== document.body && root.contains(now)) return out;
+  refocus(root, fk, rk);
+  return out;
+}
+
+/** Focuses the control with this data-focus-key, or another control in the same row. */
+function refocus(root, fk, rk) {
+  if (!root) return false;
+  const ok = (el) => el && !el.disabled && el.offsetParent !== null;
+  let el = fk ? root.querySelector(`[data-focus-key="${CSS.escape(fk)}"]`) : null;
+  if (!ok(el) && rk) el = [...root.querySelectorAll(`[data-row-key="${CSS.escape(rk)}"] [data-focus-key]`)].find(ok);
+  if (!ok(el)) return false;
+  el.focus({ preventScroll: true });
+  return true;
+}
+
+const MENU = { el: null, anchor: null };
+
+function closeMenu({ focus = false } = {}) {
+  if (!MENU.el) return;
+  const anchor = MENU.anchor;
+  MENU.el.remove();
+  MENU.el = null; MENU.anchor = null;
+  anchor?.setAttribute('aria-expanded', 'false');
+  if (focus && anchor?.isConnected) anchor.focus();
+}
+
+/**
+ * Opens a small menu under a button. items: [{ label, icon, onclick, href, danger, hint }].
+ * Arrow keys move, Escape closes, and focus goes back to the button.
+ */
+function openMenu(anchor, items) {
+  if (MENU.anchor === anchor) { closeMenu({ focus: true }); return; }
+  closeMenu();
+  hideTip();
+  const list = items.filter(Boolean);
+  const menu = h('div', { class: 'menu', role: 'menu', 'aria-label': anchor.getAttribute('aria-label') || 'Actions' },
+    list.map((it) => {
+      const kids = [it.icon && icon(it.icon, 15), h('span', { class: 'menu-label' }, it.label, it.hint && h('span', { class: 'menu-hint' }, it.hint))];
+      const run = () => { closeMenu({ focus: true }); it.onclick?.(); };
+      return it.href
+        ? h('a', { class: ['menu-item', it.danger && 'is-danger'], role: 'menuitem', tabindex: -1, href: it.href, target: '_blank', rel: 'noopener noreferrer', onclick: () => closeMenu({ focus: true }) }, kids)
+        : h('button', { type: 'button', class: ['menu-item', it.danger && 'is-danger'], role: 'menuitem', tabindex: -1, onclick: run }, kids);
+    }));
+  document.body.append(menu);
+  MENU.el = menu; MENU.anchor = anchor;
+  anchor.setAttribute('aria-expanded', 'true');
+  const r = anchor.getBoundingClientRect();
+  const mw = menu.offsetWidth; const mh = menu.offsetHeight;
+  let x = r.right - mw; x = Math.max(8, Math.min(x, window.innerWidth - mw - 8));
+  let y = r.bottom + 4; if (y + mh > window.innerHeight - 8) y = Math.max(8, r.top - mh - 4);
+  menu.style.left = `${Math.round(x)}px`; menu.style.top = `${Math.round(y)}px`;
+  const entries = [...menu.querySelectorAll('.menu-item')];
+  entries[0]?.focus();
+  menu.addEventListener('keydown', (e) => {
+    const i = entries.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown') { e.preventDefault(); entries[(i + 1) % entries.length].focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); entries[(i - 1 + entries.length) % entries.length].focus(); }
+    else if (e.key === 'Home') { e.preventDefault(); entries[0].focus(); }
+    else if (e.key === 'End') { e.preventDefault(); entries[entries.length - 1].focus(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeMenu({ focus: true }); }
+    else if (e.key === 'Tab') { closeMenu(); }
+  });
+}
+
+document.addEventListener('pointerdown', (e) => {
+  if (MENU.el && !MENU.el.contains(e.target) && !MENU.anchor?.contains(e.target)) closeMenu();
+}, true);
+document.addEventListener('scroll', (e) => { if (MENU.el && !MENU.el.contains(e.target)) closeMenu(); }, true);
+window.addEventListener('resize', () => closeMenu());
+
+/** The "⋯" button that opens a menu. getItems is called each time it opens. */
+function moreBtn(label, getItems, focusKey) {
+  return h('button', { type: 'button', class: 'icon-btn more-btn', 'aria-label': label, 'data-tip': label, 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'data-focus-key': focusKey,
+    onclick: (e) => openMenu(e.currentTarget, getItems()) }, h('span', { 'aria-hidden': 'true', class: 'more-dots' }, '⋯'));
 }
 
 // ============================================================ navigation
@@ -519,15 +740,15 @@ function renderNav() {
         if (n === steps.length) { text = '✓'; cls = 'is-done'; tip = 'Setup is done'; } else { text = `${n}/${steps.length}`; cls = 'is-progress'; tip = `${n} of ${steps.length} setup steps done`; }
       } else if (t.id === 'questions' && st.questions) { text = String(st.questions); cls = 'is-alert'; tip = `${plural(st.questions, 'question')} to answer`; }
       else if (t.id === 'jobs') {
-        const rev = st.counts?.needs_review || 0;
-        if (rev) { text = String(rev); cls = 'is-alert'; tip = `${plural(rev, 'AI answer')} to review`; }
+        const need = needYouCount();
+        if (need) { text = String(need); cls = 'is-alert'; tip = `${need} need${need === 1 ? 's' : ''} you`; }
         else if (st.counts?.saved) { text = String(st.counts.saved); tip = `${plural(st.counts.saved, 'saved job')}`; }
       }
     }
     badge.hidden = !text;
     badge.textContent = text;
     badge.className = ['nav-badge', cls].filter(Boolean).join(' ');
-    if (tip) badge.setAttribute('aria-label', tip); else badge.removeAttribute('aria-label');
+    if (tip) { badge.setAttribute('aria-label', tip); badge.setAttribute('data-tip', tip); } else { badge.removeAttribute('aria-label'); badge.removeAttribute('data-tip'); }
     // collapsed sidebar shows labels as tooltips
     if (window.matchMedia('(max-width: 1100px)').matches) a.setAttribute('data-tip', t.label + (tip ? `: ${tip}` : ''));
     else a.removeAttribute('data-tip');
@@ -545,14 +766,30 @@ function go(tab, anchor) {
 let showToken = 0;
 async function show(tab) {
   if (S.tab && S.tab !== tab && S.dirty[S.tab]) {
-    const ok = await confirmDialog({
+    const from = S.tab;
+    const save = SAVE_FN[from];
+    const choice = await choiceDialog({
       title: 'Leave without saving?',
-      body: `You have changes on ${TAB[S.tab].label} that are not saved yet.`,
-      ok: 'Discard changes', cancel: 'Stay here', danger: true,
+      body: `You have changes on ${TAB[from].label} that are not saved yet.`,
+      icon: 'alert',
+      choices: [
+        save && { value: 'save', label: 'Save and continue', kind: 'primary' },
+        { value: 'discard', label: 'Discard changes', kind: 'danger-ghost' },
+        { value: 'stay', label: 'Stay here', cancel: true },
+      ].filter(Boolean),
     });
-    if (!ok) { history.replaceState(null, '', `#${S.tab}`); return; }
-    S.dirty[S.tab] = false;
+    if (choice === 'save') {
+      await save();
+      if (S.dirty[from]) { history.replaceState(null, '', `#${from}`); return; }
+    } else if (choice === 'discard') {
+      S.dirty[from] = false;
+    } else {
+      history.replaceState(null, '', `#${from}`);
+      return;
+    }
   }
+  closeMenu();
+  hideTip();
   const t = TAB[tab];
   const token = ++showToken;
   S.tab = tab;
@@ -575,11 +812,12 @@ async function show(tab) {
   }
 }
 
-/** Re-renders the current tab, keeping the scroll position. */
+/** Re-renders the current tab, keeping the scroll position and keyboard focus. */
 function rerender() {
   if (!S.tab) return;
+  closeMenu();
   const top = view.scrollTop;
-  TAB[S.tab].render();
+  keepFocus(view, () => TAB[S.tab].render());
   view.scrollTop = top;
 }
 
@@ -652,6 +890,11 @@ function renderTopbar() {
   if (badge) { badge.hidden = !saved; badge.textContent = String(saved); }
   syncRunButtons();
   applyBtn.setAttribute('data-tip', saved ? `Apply to your ${plural(saved, 'saved job')}, best matches first, up to 25 per run` : 'No saved jobs yet. Run Search & save first.');
+  applyBtn.setAttribute('aria-label', saved ? `Apply to saved jobs, ${saved} saved` : 'Apply to saved jobs');
+  // Apply only looks like the main button once you are signed in and have a resume
+  const steps = st ? setupSteps() : [];
+  const ready = steps.length > 0 && steps.filter((s) => s.id === 'signin' || s.id === 'resumes').every((s) => s.done);
+  applyBtn.classList.toggle('btn-primary', ready);
 }
 
 /** Buttons that start a task follow the runner: off while anything runs. */
@@ -670,6 +913,11 @@ function bindTopbar() {
   $('#btnApply').prepend(icon('plane', 16));
   $('#btnStop').prepend(icon('stop', 16));
   $('#btnSearch').setAttribute('data-tip', 'Run every search that is turned on and save the jobs it finds');
+  // on narrow windows these show only their icons, so they need a spoken name
+  $('#btnSearch').setAttribute('aria-label', 'Search & save');
+  $('#btnApply').setAttribute('aria-label', 'Apply to saved jobs');
+  $('#btnStop').setAttribute('aria-label', 'Stop');
+  $('#btnStop').setAttribute('data-tip', 'Stop after the current job');
   $('#btnSearch').addEventListener('click', () => startRun('search'));
   $('#btnApply').addEventListener('click', () => startRun('apply'));
   $('#btnStop').addEventListener('click', onBusy(async () => {
@@ -688,6 +936,15 @@ async function startRun(kind, body = {}) {
     toast(`JobPilot is busy ${TASK_LABEL[st.runner.task]?.toLowerCase() || 'with a task'}. Wait for it to finish or press Stop.`, 'warn');
     return false;
   }
+  // every task works in JobPilot's Chrome, so check it is installed first
+  if (st.chrome && st.chrome.found === false) {
+    toast('Google Chrome is not installed on this computer. Install it from google.com/chrome, then reload this page.', 'error', { timeout: 12000 });
+    return false;
+  }
+  if ((kind === 'apply' || kind === 'sync') && !(st.setup?.resumes > 0)) {
+    toast('Add a resume first.', 'warn', { action: { label: 'Open Resumes', onclick: () => go('resumes') } });
+    return false;
+  }
   if (kind === 'search') {
     if (S.dirty.searches) {
       const ok = await confirmDialog({ title: 'Save your searches first?', body: 'You changed your searches but did not save yet. JobPilot searches with the saved version.', ok: 'Save and search' });
@@ -699,8 +956,8 @@ async function startRun(kind, body = {}) {
       return false;
     }
   }
+  if ((kind === 'check' || kind === 'sync') && !body.sources) body = { ...body, sources: chosenSiteIds() };
   if (kind === 'sync') {
-    if (!(st.setup?.resumes > 0)) { toast('Add your resumes first.', 'warn'); return false; }
     const ok = await confirmDialog({
       title: 'Upload resumes to sites?',
       body: [
@@ -763,7 +1020,9 @@ function connectEvents() {
       if (S.state?.setup) S.state.setup.sync = data;
       const up = (data.report || []).reduce((n, r) => n + (r.uploaded || []).length, 0);
       const bad = (data.report || []).reduce((n, r) => n + (r.failed || []).length, 0);
-      toast(`Resume upload finished: ${plural(up, 'file')} uploaded${bad ? `, ${bad} failed` : ''}. Details are on the Setup tab.`, bad ? 'warn' : 'success');
+      const onSetup = S.tab === 'setup';
+      toast(`Resume upload finished: ${plural(up, 'file')} uploaded${bad ? `, ${bad} failed` : ''}.${onSetup ? ' The details are in step 3.' : ''}`, bad ? 'warn' : 'success',
+        onSetup ? {} : { action: { label: 'See details', onclick: () => go('setup', 'step-samefiles') } });
       if (S.tab === 'setup') maybeRerenderSetup(true);
       if (S.tab === 'resumes') loadSyncRecords().then(() => { if (S.tab === 'resumes' && !S.dirty.resumes) rerender(); });
     } catch { /* ignore */ }
@@ -772,7 +1031,12 @@ function connectEvents() {
     try {
       const data = JSON.parse(e.data);
       if (S.state?.setup) S.state.setup.accounts = data;
-      toast('Account check finished. The results are on the Setup tab.', 'success');
+      const rows = (data.report || []).filter((r) => chosenSiteIds().includes(r.source));
+      const failed = rows.filter((r) => r.checkFailed).length;
+      const out = rows.filter((r) => !r.checkFailed && !r.loggedIn).length;
+      const msg = failed ? `Account check finished, but ${plural(failed, 'site')} could not be checked. Press Check accounts again.`
+        : out ? `Account check finished. You are not signed in on ${plural(out, 'site')}.` : 'Account check finished. You are signed in everywhere.';
+      toast(msg, failed || out ? 'warn' : 'success', S.tab === 'setup' ? {} : { action: { label: 'See results', onclick: () => go('setup', 'step-signin') } });
       if (S.tab === 'setup') maybeRerenderSetup(true);
       renderNav();
     } catch { /* ignore */ }
@@ -786,9 +1050,16 @@ async function pollState() {
   } catch { /* offline banner shows */ }
 }
 
+const shownWarnings = new Set();
 function applyState(st) {
   const prevRunner = S.state?.runner;
   S.state = st;
+  // a file with a typo was started fresh; its old copy was kept, so say where
+  for (const w of st.warnings || []) {
+    if (shownWarnings.has(w)) continue;
+    shownWarnings.add(w);
+    toast(w, 'warn');
+  }
   mergeLog(st.log || []);
   if (S.lastRunAt === undefined) S.lastRunAt = st.runner?.last?.at || null;
   handleRunner(prevRunner, st.runner);
@@ -800,6 +1071,8 @@ function applyState(st) {
 function setRunner(r) {
   if (!S.state) return;
   const prev = S.state.runner;
+  // live updates may leave out the open tab count; keep the last one we had
+  if (r && r.waitingTabs === undefined && prev?.waitingTabs !== undefined) r = { ...r, waitingTabs: prev.waitingTabs };
   S.state.runner = r;
   handleRunner(prev, r);
   renderTopbar();
@@ -818,7 +1091,9 @@ function handleRunner(prev, r) {
 
 function onTaskFinished(last) {
   const name = TASK_NAME[last.task] || 'Task';
-  if (last.ok) toast(`${name} finished: ${last.summary || 'done'}.`, 'success', { timeout: 7000 });
+  // a finished account check or resume upload has its own message from the 'check' and 'sync' events
+  if (last.ok && (last.task === 'check' || last.task === 'sync')) { /* no second toast */ }
+  else if (last.ok) toast(`${name} finished: ${last.summary || 'done'}.`, 'success', { timeout: 7000 });
   else toast(`${name} stopped: ${last.summary || 'something went wrong'}`, 'error');
   pollState();
   if (['jobs', 'questions', 'sheet'].includes(S.tab) && !S.dirty[S.tab]) refreshCurrentData();
@@ -837,7 +1112,7 @@ function scheduleJobsRefresh() {
   jobsTimer = setTimeout(async () => {
     jobsTimer = null;
     if (S.tab !== 'jobs') return;
-    if (document.activeElement?.closest?.('.jobs-table select')) return;
+    if (MENU.el || document.activeElement?.closest?.('.jobs-table select')) return;
     try {
       S.jobs = await api('GET', '/api/jobs', undefined, { quiet: true });
       if (S.tab === 'jobs') renderJobsBody();
@@ -866,12 +1141,26 @@ function addLog(e, { quietCount = false } = {}) {
   renderLogHead();
 }
 
+const LOG_LEVEL = { info: '', warn: 'Heads up', error: 'Problem' };
 function logLine(e) {
   const level = ['warn', 'error'].includes(e.level) ? e.level : 'info';
+  const [msg, tech] = splitTechnical(e.msg);
+  const job = typeof e.job === 'string' && e.job ? e.job : null;
   return h('div', { class: `log-line lvl-${level}` },
     h('span', { class: 'log-time' }, fmtClock(e.ts)),
-    h('span', { class: 'log-lvl' }, level === 'info' ? '' : level === 'warn' ? 'Warn' : 'Error'),
-    h('span', { class: 'log-msg' }, e.msg));
+    h('span', { class: 'log-lvl' }, LOG_LEVEL[level]),
+    h('span', { class: 'log-msg' }, msg,
+      job && h('button', { type: 'button', class: 'link-btn log-view', 'aria-label': 'View this job on the Jobs tab', onclick: () => showJob(job) }, 'View'),
+      tech && h('details', { class: 'log-tech' }, h('summary', null, 'Technical details'), h('pre', null, tech))));
+}
+
+/** Opens the Jobs tab with every filter cleared, then scrolls to one job and flashes it. */
+function showJob(key) {
+  J.status = 'all'; J.site = 'all'; J.q = '';
+  J.highlight = key;
+  if (S.tab === 'jobs' && J.els.tbody?.isConnected) {
+    api('GET', '/api/jobs', undefined, { quiet: true }).then((jobs) => { S.jobs = jobs; }).catch(() => {}).finally(() => { if (S.tab === 'jobs') renderJobs(); });
+  } else go('jobs');
 }
 
 function appendLogLine(e) {
@@ -893,7 +1182,7 @@ function drawLog() {
 function renderLogHead() {
   const last = S.log[S.log.length - 1];
   const prev = $('#logPreview');
-  prev.textContent = last ? `${fmtClock(last.ts)}  ${last.msg}` : 'Nothing has happened yet.';
+  prev.textContent = last ? `${fmtClock(last.ts)}  ${splitTechnical(last.msg)[0]}` : 'Nothing has happened yet.';
   prev.className = `log-preview${last && last.level !== 'info' ? ` lvl-${last.level}` : ''}`;
   prev.hidden = S.logOpen;
   const counts = $('#logCounts');
@@ -938,7 +1227,14 @@ async function loadResumesData() {
   if (!S.dirty.resumes || !E.resumes) E.resumes = resumesDraft(S.resumes);
 }
 async function loadSetup() {
-  await Promise.all([loadProfileData().catch(() => {}), loadResumesData().catch(() => {})]);
+  await Promise.all([loadProfileData().catch(() => {}), loadResumesData().catch(() => {}), loadSearchList()]);
+}
+/** The saved searches, for the summary in setup step 6. Keeps unsaved edits on the Searches tab. */
+async function loadSearchList() {
+  try {
+    S.searches = await api('GET', '/api/searches', undefined, { quiet: true });
+    if (!S.dirty.searches) E.searches = searchesDraft(S.searches);
+  } catch { /* the step just shows the count */ }
 }
 async function loadProfileTab() {
   await Promise.all([loadProfileData(), S.resumes ? null : loadResumesData().catch(() => {})]);
@@ -955,7 +1251,12 @@ async function loadJobsTab() {
   const [jobs] = await Promise.all([api('GET', '/api/jobs'), loadResumesData().catch(() => {})]);
   S.jobs = jobs;
 }
-async function loadQuestionsTab() { S.review = await api('GET', '/api/review'); }
+async function loadQuestionsTab() {
+  const [review] = await Promise.all([api('GET', '/api/review'),
+    // which jobs still have a tab open, for the message after you answer
+    api('GET', '/api/jobs', undefined, { quiet: true }).then((jobs) => { S.jobs = jobs; }).catch(() => {})]);
+  S.review = review;
+}
 async function loadSheetTab() { S.sheet = await api('GET', '/api/sheet'); }
 async function loadAnswersTab() {
   S.answers = await api('GET', '/api/answers');
@@ -988,9 +1289,10 @@ function setupSteps() {
   const bySrc = Object.fromEntries(report.map((r) => [r.source, r]));
   const skills = (S.profile?.profile?.skills || []).length;
   const c = st.counts || {};
+  const chosen = chosenSiteIds();
   // the same order as the README's "First time setup", plus a practice run
   return [
-    { id: 'signin', title: 'Sign in to each site in JobPilot\'s Chrome', done: report.length > 0 && sources().every((s) => bySrc[s.id]?.loggedIn) },
+    { id: 'signin', title: 'Sign in to each site in JobPilot\'s Chrome', done: report.length > 0 && chosen.every((id) => bySrc[id]?.loggedIn && !bySrc[id]?.checkFailed) },
     { id: 'resumes', title: 'Add your resumes', done: su.resumes > 0 },
     { id: 'samefiles', title: 'Upload your resumes to each site', done: resumesCurrent(report) },
     { id: 'profile', title: 'Fill in your profile and documents', done: !!su.profile?.complete },
@@ -999,10 +1301,13 @@ function setupSteps() {
     { id: 'practice', title: 'Do a practice run', done: (c.filled_not_submitted || 0) + (c.submitted || 0) + (c.needs_review || 0) > 0 },
   ];
 }
-/** Every resume is "current" on LinkedIn and Handshake in the last check. */
+/** Every resume is "current" on the chosen sites among LinkedIn and Handshake in the last check. */
 function resumesCurrent(report) {
-  const need = ['linkedin', 'handshake'].filter((id) => sources().some((s) => s.id === id));
-  if (!need.length || !report.length) return false;
+  if (!report.length) return false;
+  const chosen = chosenSiteIds();
+  const need = ['linkedin', 'handshake'].filter((id) => chosen.includes(id));
+  // Indeed takes the matching resume at apply time, so only a sign in is needed there
+  if (!need.length) return chosen.every((id) => report.find((x) => x.source === id)?.loggedIn);
   return need.every((id) => {
     const r = report.find((x) => x.source === id);
     if (!r?.loggedIn) return false;
@@ -1014,7 +1319,7 @@ const setupComplete = () => { const su = S.state?.setup; return !!(su && su.resu
 
 function setupSig() {
   const st = S.state;
-  return JSON.stringify([st?.setup, st?.chrome, st?.counts, st?.runner?.task, st?.settings?.submit, (S.profile?.profile?.skills || []).length, S.profile?.profile?.documents, (S.resumes || []).map((r) => r.file)]);
+  return JSON.stringify([st?.setup, st?.chrome, st?.counts, st?.runner?.task, st?.settings?.submit, chosenSiteIds(), (S.profile?.profile?.skills || []).length, S.profile?.profile?.documents, (S.resumes || []).map((r) => r.file)]);
 }
 function maybeRerenderSetup(force) {
   if (S.tab !== 'setup' || !S.state) return;
@@ -1063,37 +1368,91 @@ function stepCard(n, s, isNext, { body, actions, optional }) {
 
 
 async function openChrome() {
-  const res = await api('POST', '/api/chrome/open').catch(() => null);
-  if (!res) return;
-  if (res.running) toast('JobPilot\'s Chrome is open. Look for the new Chrome window.', 'success');
-  else toast('Chrome did not start. Try again, or look at the terminal for an error.', 'error');
+  let res;
+  const again = { label: 'Try again', onclick: () => openChrome() };
+  try {
+    res = await api('POST', '/api/chrome/open', undefined, { quiet: true });
+  } catch (e) {
+    toast(e.message, 'error', { action: again, timeout: 12000 });
+    return;
+  }
+  if (res?.running) toast('JobPilot\'s Chrome is open. Look for the new Chrome window.', 'success');
+  else toast(String(res?.error || res?.message || res?.note || 'Chrome did not start.'), 'error', { action: again, timeout: 12000 });
   pollState();
 }
 
 function accountRow(srcId) {
   const row = (S.state.setup?.accounts?.report || []).find((r) => r.source === srcId);
   if (!row) return pill('Not checked yet', 'gray');
+  if (row.checkFailed) return pill('Couldn\'t check', 'amber', { tip: `${row.note ? `${row.note} ` : ''}Press Check my sign ins again.` });
   return row.loggedIn ? pill('Signed in', 'green') : pill('Not signed in', 'red', { tip: row.note || '' });
+}
+
+/** Saves which job sites this person uses. It saves right away, like the Submit switch. */
+async function saveSites(ids, input) {
+  if (!ids.length) {
+    toast('Pick at least one site.', 'warn');
+    if (input) input.checked = true;
+    return;
+  }
+  const res = await api('PUT', '/api/settings', { sites: ids }).catch(() => null);
+  if (!res) { if (input) input.checked = !input.checked; return; }
+  if (!Array.isArray(res.sites)) S.localSites = ids; // an older JobPilot does not store this yet
+  if (S.state) S.state.settings = { ...res, sites: Array.isArray(res.sites) ? res.sites : ids };
+  S.settings = S.state?.settings || res;
+  if (E.settings && !S.dirty.settings) E.settings = clone(S.settings);
+  else if (E.settings) E.settings.sites = clone(S.settings.sites);
+  renderTopbar();
+  renderNav();
+  if (S.tab === 'setup') rerender();
+}
+
+function siteChooser() {
+  const chosen = chosenSiteIds();
+  return h('fieldset', { class: 'fieldset site-chooser' },
+    h('legend', { class: 'field-label' }, 'Which sites do you use?'),
+    h('div', { class: 'chip-group' }, sources().map((s) => h('label', { class: 'chip-check' },
+      h('input', { type: 'checkbox', checked: chosen.includes(s.id), 'data-focus-key': `site:${s.id}`, onchange: (e) => {
+        const next = sources().map((x) => x.id).filter((id) => (id === s.id ? e.target.checked : chosen.includes(id)));
+        saveSites(next, e.target);
+      } }),
+      h('span', null, s.label)))),
+    h('p', { class: 'field-hint' }, 'JobPilot only signs in, uploads and searches on the sites you pick. This saves right away.'));
 }
 
 function stepSignin() {
   const ch = S.state.chrome || {};
+  const task = S.state.runner?.task;
+  const acc = S.state.setup?.accounts;
+  const chosen = chosenSources();
+  const names = chosen.map((s) => s.label);
+  const list = names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0] || 'each site';
   return {
     body: [
-      h('p', null, 'JobPilot works in its own Chrome window, separate from the browser you use every day. Press Open Chrome, then sign in to LinkedIn, Handshake and Indeed there the way you normally do. That window keeps its own logins, so after the first time you stay signed in.'),
-      !ch.found && callout('warn', 'Google Chrome was not found on this computer. Install Google Chrome, then reload this page.'),
+      h('p', null, `JobPilot works in its own Chrome window, separate from the browser you use every day. Press Open Chrome, then sign in to ${list} there the way you normally do. That window keeps its own logins, so after the first time you stay signed in.`),
+      siteChooser(),
+      !ch.found && callout('warn', 'Google Chrome is not installed on this computer. Install it from google.com/chrome, then reload this page.'),
       h('div', { class: 'site-row' },
         h('span', { class: 'site-row-name' }, 'Chrome'),
         ch.running ? pill('Open', 'green') : pill('Not open', 'gray'),
         h('span', { class: 'spacer' }),
         btn('Open Chrome', { size: 'sm', kind: ch.running ? '' : 'primary', icon: 'globe', disabled: !ch.found, onclick: onBusy(openChrome) })),
-      h('div', { class: 'site-rows' }, sources().map((s) => h('div', { class: 'site-row' },
-        h('span', { class: 'site-row-name' }, s.label),
-        accountRow(s.id),
-        h('span', { class: 'spacer' }),
-        btn(`Sign in to ${s.label}`, { size: 'sm', icon: 'login', onclick: onBusy(() => openSiteLogin(s.id, s.label)) })))),
-      h('p', { class: 'small muted' }, 'JobPilot confirms your sign-ins when you press Check accounts in step 3.'),
+      h('div', { class: 'site-rows' }, chosen.map((s) => {
+        const row = (acc?.report || []).find((r) => r.source === s.id);
+        return h('div', { class: 'site-row' },
+          h('span', { class: 'site-row-name' }, s.label),
+          accountRow(s.id),
+          h('span', { class: 'spacer' }),
+          row?.checkFailed && row.note ? h('span', { class: 'small muted site-row-note' }, row.note.replace(/Press Check accounts again\.?/i, 'Press Check my sign ins again.')) : null,
+          btn(`Sign in to ${s.label}`, { size: 'sm', icon: 'login', onclick: onBusy(() => openSiteLogin(s.id, s.label)) }));
+      })),
+      task === 'check' ? spinnerLine('Checking your sign ins now. This takes about a minute.')
+        : acc?.at ? h('p', { class: 'small muted' }, `Last checked ${timeAgo(acc.at)}. After you sign in, press Check my sign ins.`)
+          : h('p', { class: 'small muted' }, 'After you sign in, press Check my sign ins so JobPilot can confirm it.'),
       h('p', { class: 'small muted' }, 'JobPilot never creates accounts, never types your passwords and never solves captchas.'),
+    ],
+    actions: [
+      btn('Check my sign ins', { icon: 'shield', attrs: runAttrs(!ch.found), disabled: !!task || !ch.found, tip: task ? 'Wait for the current task to finish' : 'Opens each site in JobPilot\'s Chrome and checks that you are signed in', onclick: () => startRun('check') }),
     ],
   };
 }
@@ -1168,7 +1527,7 @@ function stepProfile(s) {
       h('div', null,
         h('div', { class: 'small', style: { margin: '4px 0 8px', fontWeight: '600', color: 'var(--text)' } }, 'Documents'),
         docRow('transcript', 'Transcript (recommended for Handshake)'), docRow('coverLetter', 'Cover letter (optional)')),
-      h('p', { class: 'small' }, 'Handshake asks for a transcript on some jobs. Add it here and Upload resumes to sites puts it in your Handshake Documents as a Transcript. If you skip this, JobPilot uses the newest transcript already on Handshake. The cover letter is attached when a form has a cover letter field.'),
+      h('p', { class: 'small' }, 'Handshake asks for a transcript on some jobs. Add it here, or later on the Profile tab under Documents, and Upload resumes to sites puts it in your Handshake Documents as a Transcript. If you skip this, JobPilot uses the newest transcript already on Handshake. The cover letter is attached when a form has a cover letter field.'),
     ],
     actions: [btn(s.done ? 'Review your profile' : 'Fill in your profile', { kind: s.done ? '' : 'primary', icon: 'user', onclick: () => go('profile') })],
   };
@@ -1241,14 +1600,41 @@ function stepSkills(s) {
   };
 }
 
+const LEVEL_LABEL = { internship: 'Internship', entry: 'Entry level', associate: 'Associate' };
+const POSTED_LABEL = { day: 'Past day', week: 'Past week', month: 'Past month' };
+
+/** One plain line about what a search looks for, like: Looks for "software engineer" in United States. */
+function searchSummary(s) {
+  const usesUrl = sources().filter((x) => String(s.urls?.[x.id] || '').trim()).map((x) => x.label);
+  const what = String(s.keywords || '').trim();
+  const where = String(s.location || '').trim();
+  const head = what ? `Looks for "${what}"${where ? ` in ${where}` : ''}` : usesUrl.length ? `Uses your own search link on ${usesUrl.join(' and ')}` : `Looks for any job${where ? ` in ${where}` : ''}`;
+  const level = (Array.isArray(s.experience) ? s.experience : s.experience ? [s.experience] : []).map((x) => LEVEL_LABEL[x] || humanize(x));
+  const sites = (Array.isArray(s.sources) ? s.sources : sources().map((x) => x.id)).map(siteLabel);
+  const bits = [level.join(', '), POSTED_LABEL[s.posted] || 'Any time', sites.join(', ')].filter(Boolean);
+  return { head, sub: bits.join(' · ') };
+}
+
 function stepSearch(s) {
   const n = S.state.setup?.searches || 0;
+  const list = (Array.isArray(S.searches) ? S.searches : []);
+  const shown = list.slice(0, 3);
+  const isExample = list.length === 1 && list[0].name === 'Entry level software engineer' && list[0].keywords === 'software engineer';
   return {
     body: [
       h('p', null, 'Tell JobPilot what to look for: keywords, location, level, how recent and which sites. You can also paste a search URL from a site to use that exact search.'),
-      n > 0 && h('span', { class: 'status-line ok' }, icon('checkCircle', 16), `${plural(n, 'search', 'searches')} saved.`),
+      shown.length > 0 && h('div', { class: 'search-sum-list' }, shown.map((x) => {
+        const sum = searchSummary(x);
+        return h('div', { class: ['search-sum', x.enabled === false && 'is-off'] },
+          h('span', { class: 'search-sum-icon' }, icon('search', 16)),
+          h('div', { class: 'search-sum-text' },
+            h('div', { class: 'search-sum-head' }, `${sum.head}.`, x.enabled === false && h('span', { class: 'tag', style: { marginLeft: '8px' } }, 'Turned off')),
+            h('div', { class: 'small muted' }, sum.sub)));
+      }), list.length > 3 && h('p', { class: 'small muted' }, `And ${plural(list.length - 3, 'more search', 'more searches')}.`)),
+      shown.length > 0 && h('p', { class: 'small muted' }, isExample ? 'This is the example search JobPilot starts with. Change it so it fits the jobs you want.' : 'You can change your searches at any time.'),
+      !shown.length && n > 0 && h('span', { class: 'status-line ok' }, icon('checkCircle', 16), `${plural(n, 'search', 'searches')} saved.`),
     ],
-    actions: [btn(s.done ? 'Open Searches' : 'Add a search', { kind: s.done ? '' : 'primary', icon: 'search', onclick: () => go('searches') })],
+    actions: [btn(n ? (n === 1 ? 'Edit this search' : 'Edit your searches') : 'Add a search', { kind: s.done ? '' : 'primary', icon: n ? 'sliders' : 'search', onclick: () => go('searches') })],
   };
 }
 
@@ -1317,13 +1703,21 @@ const RESUME_STATE = {
 };
 
 function accountReport(acc) {
-  if (!acc?.report?.length) return callout('neutral', 'No check yet. Sign in to the sites in step 1, then press Check accounts.');
+  const chosen = chosenSiteIds();
+  const report = (acc?.report || []).filter((r) => chosen.includes(r.source));
+  if (!report.length) return callout('neutral', 'No check yet. Sign in to the sites in step 1, then press Check accounts.');
   return h('div', { class: 'report-block' },
     h('div', { class: 'report-head' }, h('span', { class: 'report-title' }, 'Last check'), h('span', { class: 'small muted' }, timeAgo(acc.at))),
-    h('div', { class: 'acct-grid' }, acc.report.map(acctCard)));
+    h('div', { class: 'acct-grid' }, report.map(acctCard)));
 }
 
 function acctCard(r) {
+  if (r.checkFailed) {
+    return h('div', { class: ['acct-card', 'is-warn'] },
+      h('div', { class: 'acct-head' }, h('span', { class: 'acct-name' }, r.label || siteLabel(r.source)), pill('Couldn\'t check', 'amber')),
+      r.note && h('p', { class: 'small' }, r.note),
+      !/check accounts/i.test(r.note || '') && h('p', null, 'Press Check accounts again.'));
+  }
   const rows = Array.isArray(r.resumes) ? r.resumes : null;
   const notCurrent = rows ? rows.filter((x) => x.state !== 'current' && x.state !== 'switch on apply').length : (r.missing || []).length;
   const tr = r.source === 'handshake' && r.loggedIn ? r.transcript : undefined;
@@ -1361,7 +1755,7 @@ function acctCard(r) {
       r.indeedCurrent?.name && h('span', { class: 'muted' }, r.indeedCurrent.resume ? ` (your ${r.indeedCurrent.resume})` : ' (not a copy JobPilot uploaded)')),
     r.source === 'handshake' && r.loggedIn && h('div', { class: 'small' },
       tr ? [h('strong', null, 'Newest transcript: '), h('span', { class: 'mono' }, tr.onSite), tr.date && h('span', { class: 'muted' }, ` (${tr.date})`)]
-        : [h('strong', null, 'Transcript: '), mineTranscript ? 'none found on Handshake. Upload resumes to sites puts yours up too.' : 'none found on Handshake. Add one in step 4 if your jobs ask for it.']),
+        : [h('strong', null, 'Transcript: '), mineTranscript ? 'none found on Handshake. Upload resumes to sites puts yours up too.' : 'none found on Handshake. Add one on the Profile tab under Documents if your jobs ask for it.']),
     r.source === 'handshake' && r.loggedIn && (r.documents || []).length > 0 && h('details', null,
       h('summary', null, `Documents on Handshake (${r.documents.length})`),
       h('table', { class: 'mini-table' },
@@ -1416,7 +1810,8 @@ function profileDraft(p) {
   const values = {};
   for (const f of p?.fields || []) values[f.key] = f.kind === 'yesno' ? yesNo(prof[f.key]) : (prof[f.key] ?? '');
   const skills = (Array.isArray(prof.skills) ? prof.skills : []).map((s) => ({ ...s }));
-  return { values, skills };
+  const lists = Object.fromEntries((p?.lists || []).map((l) => [l.key, (Array.isArray(prof[l.key]) ? prof[l.key] : []).map((e) => ({ ...e }))]));
+  return { values, skills, lists };
 }
 
 function renderProfile() {
@@ -1430,6 +1825,11 @@ function renderProfile() {
   }).filter((s) => s.fields.length);
   const rest = fields.filter((f) => !used.has(f.key));
   if (rest.length) sections.splice(sections.length - 1, 0, { id: 'more', title: 'More', fields: rest });
+  // sections and unlimited lists, in page order
+  const listMeta = new Map((S.profile.lists || []).map((l) => [l.key, l]));
+  const placed = new Set();
+  const blocks = sections.flatMap((sec) => [sec, ...(LIST_AFTER[sec.id] || []).map((k) => { placed.add(k); return listMeta.get(k); }).filter(Boolean).map((l) => ({ list: l, id: l.key, title: l.title }))]);
+  for (const l of listMeta.values()) if (!placed.has(l.key)) blocks.push({ list: l, id: l.key, title: l.title });
 
   const progress = h('span');
   const updateProgress = () => {
@@ -1441,10 +1841,11 @@ function renderProfile() {
   view.replaceChildren(h('div', { class: 'view-inner' },
     pageHead('Profile', 'Fill this in once. JobPilot uses it to answer the questions almost every application asks.', [progress]),
     h('nav', { class: 'section-nav', 'aria-label': 'Profile sections' },
-      [...sections, { id: 'skills', title: 'Skills' }].map((s) => h('a', { href: `#profile`, onclick: (e) => { e.preventDefault(); document.getElementById(`sec-${s.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); } }, s.title))),
-    sections.map((sec) => h('section', { class: 'card', id: `sec-${sec.id}` },
+      [...blocks, { id: 'documents', title: 'Documents' }, { id: 'skills', title: 'Skills' }].map((s) => h('a', { href: `#profile`, onclick: (e) => { e.preventDefault(); document.getElementById(`sec-${s.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); } }, s.title))),
+    blocks.map((sec) => sec.list ? listCard(sec.list) : h('section', { class: 'card', id: `sec-${sec.id}` },
       cardHead(sec.title, sec.note),
       h('div', { class: 'form-grid' }, sec.fields.map((f) => profileField(f, updateProgress))))),
+    documentsCard(),
     skillsCard(),
     savebar('profile', saveProfile, () => { E.profile = profileDraft(S.profile); rerender(); })));
 }
@@ -1481,6 +1882,116 @@ function profileField(f, onAny) {
   return wrap;
 }
 
+function entryTitle(list, e, i) {
+  const main = { education: e.school, experience: [e.title, e.company].filter(Boolean).join(' at '), projects: e.name, certifications: e.name, links: e.label || e.url }[list.key];
+  return main || `${cap(list.item)} ${i + 1}`;
+}
+
+/** Transcript and cover letter, the same rows as setup step 4. */
+function documentsCard() {
+  return h('section', { class: 'card', id: 'sec-documents' },
+    cardHead('Documents', 'Handshake asks for a transcript on some jobs, and some forms have a cover letter field.'),
+    docRow('transcript', 'Transcript (recommended for Handshake)'),
+    docRow('coverLetter', 'Cover letter (optional)'),
+    h('p', { class: 'small muted', style: { marginTop: '10px' } }, 'Upload resumes to sites puts your transcript in your Handshake Documents as a Transcript. If you skip it, JobPilot uses the newest transcript already on Handshake. These files save right away.'));
+}
+
+// lists where the first entry answers single answer questions, so new ones go on top
+const NEW_ON_TOP = new Set(['education', 'experience']);
+
+/** One unlimited list on the Profile tab: add, reorder and remove entries. */
+function listCard(list) {
+  const rows = E.profile.lists[list.key] || (E.profile.lists[list.key] = []);
+  const body = h('div', { class: 'entry-list' });
+  const focusIn = (i, act, fallback) => {
+    const entry = body.children[i];
+    if (!entry) return;
+    let b = entry.querySelector(`[data-act="${act}"]`);
+    if (!b || b.disabled) b = fallback ? entry.querySelector(`[data-act="${fallback}"]`) : null;
+    if (!b || b.disabled) b = entry.querySelector('[data-act="remove"]');
+    b?.focus({ preventScroll: true });
+    b?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  };
+  const move = (i, d) => {
+    [rows[i], rows[i + d]] = [rows[i + d], rows[i]];
+    markDirty('profile'); draw(); hideTip();
+    const act = d < 0 ? 'up' : 'down';
+    focusIn(i + d, act, act === 'up' ? 'down' : 'up');
+  };
+  const remove = (i) => {
+    const e = rows[i];
+    const name = entryTitle(list, e, i);
+    const hasText = Object.values(e).some((v) => String(v ?? '').trim());
+    rows.splice(i, 1);
+    markDirty('profile'); draw(); hideTip();
+    if (rows.length) focusIn(Math.min(i, rows.length - 1), 'remove');
+    else addBtn.focus();
+    if (hasText) {
+      toast(`Removed ${name}.`, 'info', { timeout: 10000, action: { label: 'Undo', onclick: () => {
+        const cur = E.profile?.lists?.[list.key];
+        if (!cur) return;
+        const at = Math.min(i, cur.length);
+        cur.splice(at, 0, e);
+        markDirty('profile');
+        if (S.tab !== 'profile') return;
+        if (cur === rows && body.isConnected) { draw(); focusIn(at, 'remove'); } else rerender();
+      } } });
+    }
+  };
+  const draw = () => {
+    body.replaceChildren(...(rows.length ? rows.map((e, i) => {
+      const title = h('h3', { class: 'entry-title' }, entryTitle(list, e, i));
+      const labels = (name) => [`Move ${name} up`, `Move ${name} down`, `Remove ${name}`];
+      const [upL, downL, rmL] = labels(entryTitle(list, e, i));
+      const up = iconBtn('arrowUp', upL, () => move(i, -1), { disabled: i === 0 });
+      const down = iconBtn('arrowDown', downL, () => move(i, 1), { disabled: i === rows.length - 1 });
+      const rm = iconBtn('trash', rmL, () => remove(i), { kind: 'danger' });
+      up.dataset.act = 'up'; down.dataset.act = 'down'; rm.dataset.act = 'remove';
+      const set = (k, v) => {
+        e[k] = v; markDirty('profile');
+        const name = entryTitle(list, e, i);
+        title.textContent = name;
+        labels(name).forEach((l, n) => { const b = [up, down, rm][n]; b.setAttribute('aria-label', l); b.setAttribute('data-tip', l); });
+      };
+      return h('div', { class: 'entry' },
+        h('div', { class: 'entry-head' }, title, i === 0 && rows.length > 1 && NEW_ON_TOP.has(list.key) && h('span', { class: 'tag', 'data-tip': 'Single answer questions use this one' }, 'Used first'),
+          h('div', { class: 'entry-actions' }, up, down, rm)),
+        h('div', { class: 'form-grid' }, list.fields.map((f) => listField(f, e, set))));
+    }) : [emptyState({ small: true, icon: 'plus', title: `No ${list.title.toLowerCase()} yet`, text: 'Add as many as you like.' })]));
+  };
+  draw();
+  const addLabel = list.item === 'education' ? 'Add education' : `Add a ${list.item}`;
+  const addBtn = btn(addLabel, { kind: 'soft', icon: 'plus', onclick: () => {
+    const fresh = Object.fromEntries(list.fields.map((f) => [f.key, '']));
+    const top = NEW_ON_TOP.has(list.key);
+    if (top) rows.unshift(fresh); else rows.push(fresh);
+    markDirty('profile'); draw(); hideTip();
+    const entry = top ? body.firstElementChild : body.lastElementChild;
+    entry?.querySelector('input, select, textarea')?.focus({ preventScroll: true });
+    entry?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  } });
+  return h('section', { class: 'card', id: `sec-${list.key}` },
+    cardHead(list.title, LIST_NOTES[list.key], [addBtn]),
+    body);
+}
+
+function listField(f, e, set) {
+  const val = e[f.key] ?? '';
+  let control;
+  if (f.kind === 'select') {
+    const opts = f.options || [];
+    const all = val && !opts.includes(val) ? [...opts, val] : opts;
+    control = h('select', { class: 'input', value: String(val), onchange: (ev) => set(f.key, ev.target.value) },
+      h('option', { value: '' }, 'Choose…'), all.map((o) => h('option', { value: o }, o)));
+  } else if (f.kind === 'textarea') {
+    control = h('textarea', { class: 'input', rows: 3, value: String(val), maxlength: 1500, oninput: (ev) => set(f.key, ev.target.value) });
+  } else {
+    const extra = LIST_INPUT[f.key] || FIELD_INPUT[f.key] || {};
+    control = h('input', { class: 'input', type: extra.type || 'text', value: String(val), placeholder: extra.placeholder, inputmode: extra.inputmode, autocomplete: 'off', oninput: (ev) => set(f.key, ev.target.value) });
+  }
+  return field(f.label, control, { wide: f.kind === 'textarea' });
+}
+
 function skillsCard() {
   const tbody = h('tbody');
   const suggestions = [...new Set((S.resumes || []).flatMap((r) => r.skills || []))].sort();
@@ -1494,13 +2005,19 @@ function skillsCard() {
       h('td', null, h('input', { class: 'input input-sm', value: s.name || '', list: 'skillSuggestions', placeholder: 'For example React', 'aria-label': `Skill ${i + 1} name`, oninput: (e) => { s.name = e.target.value; markDirty('profile'); } })),
       h('td', { class: 'num' }, h('input', { class: 'input input-sm', type: 'number', min: 0, max: 60, step: 1, value: s.years ?? '', style: { width: '88px' }, 'aria-label': `Years with ${s.name || 'this skill'}`, oninput: (e) => { s.years = e.target.value === '' ? '' : Number(e.target.value); markDirty('profile'); } })),
       h('td', null, s.fromResume ? h('span', { class: 'tag', 'data-tip': 'Found by scanning your resumes' }, 'From resume') : h('span', { class: 'tag' }, 'Added by you')),
-      h('td', { class: 'col-actions' }, iconBtn('trash', `Remove ${s.name || 'this skill'}`, () => { rows.splice(i, 1); markDirty('profile'); draw(); }, { kind: 'danger' })))));
+      h('td', { class: 'col-actions' }, iconBtn('trash', `Remove ${s.name || 'this skill'}`, () => {
+        rows.splice(i, 1); markDirty('profile'); draw(); hideTip();
+        // keep keyboard focus in the table: the next row's remove button, or Add a skill
+        const next = tbody.querySelectorAll('tr')[Math.min(i, rows.length - 1)]?.querySelector('.icon-btn');
+        (rows.length && next ? next : addSkillBtn).focus({ preventScroll: true });
+      }, { kind: 'danger' })))));
   };
+  const addSkillBtn = btn('Add a skill', { kind: 'soft', icon: 'plus', onclick: () => { E.profile.skills.push({ name: '', years: Number(E.profile.values.yearsExperience) || 1 }); markDirty('profile'); draw(); tbody.querySelector('tr:last-child input')?.focus(); } });
   draw();
   return h('section', { class: 'card', id: 'sec-skills' },
     cardHead('Skills', null, [
       btn('Scan my resumes', { icon: 'sparkle', disabled: !(S.state?.setup?.resumes > 0), tip: S.state?.setup?.resumes > 0 ? 'Adds skills found in your resumes. It never removes any.' : 'Upload a resume first', onclick: onBusy(scanSkills) }),
-      btn('Add a skill', { kind: 'soft', icon: 'plus', onclick: () => { E.profile.skills.push({ name: '', years: Number(E.profile.values.yearsExperience) || 1 }); markDirty('profile'); draw(); tbody.querySelector('tr:last-child input')?.focus(); } }),
+      addSkillBtn,
     ]),
     callout('info', 'Skill years answer questions like "How many years of experience do you have with React?" Any skill you do not list here is answered with 0, and "Do you have experience with it?" gets No.'),
     h('datalist', { id: 'skillSuggestions' }, suggestions.map((s) => h('option', { value: s }))),
@@ -1520,7 +2037,8 @@ async function saveProfile() {
     const years = Number(s.years);
     skills.push({ ...s, name, years: Number.isFinite(years) && years >= 0 ? years : 0 });
   }
-  const res = await api('PUT', '/api/profile', { profile: { ...E.profile.values, skills } }).catch(() => null);
+  const lists = Object.fromEntries(Object.entries(E.profile.lists || {}).map(([k, rows]) => [k, rows.filter((e) => Object.values(e).some((v) => String(v ?? '').trim()))]));
+  const res = await api('PUT', '/api/profile', { profile: { ...E.profile.values, skills, ...lists } }).catch(() => null);
   if (!res) return;
   S.profile.profile = res.profile;
   E.profile = profileDraft(S.profile);
@@ -1621,13 +2139,13 @@ function resumesTableCard() {
         ? h('div', { class: 'tags', 'data-tip': skills.join(', ') }, skills.slice(0, 7).map((s) => h('span', { class: 'tag' }, s)), skills.length > 7 && h('span', { class: 'tag' }, `+${skills.length - 7} more`))
         : h('span', { class: 'small muted' }, 'None found')),
       h('td', null, siteCopiesCell(row.file)),
-      h('td', { class: 'col-actions' }, iconBtn('trash', `Delete ${row.file}`, () => deleteResume(row.file), { kind: 'danger' })));
+      h('td', { class: 'col-actions col-sticky' }, iconBtn('trash', `Delete ${row.file}`, () => deleteResume(row.file), { kind: 'danger' })));
   });
   const card = h('section', { class: 'table-card drop-target' },
     h('div', { class: 'table-wrap' },
       h('table', { class: 'table table-min-resumes' },
         h('thead', null, h('tr', null,
-          h('th', { 'data-tip': 'Used when no resume clearly fits better' }, 'Default'), h('th', null, 'File'), h('th', null, 'Role tags'), h('th', null, 'Keywords'), h('th', null, 'Skills found'), h('th', { 'data-tip': 'The dated copy JobPilot uploaded to each site, from Upload resumes to sites' }, 'On the sites'), h('th', null, h('span', { class: 'sr-only' }, 'Actions')))),
+          h('th', { 'data-tip': 'Used when no resume clearly fits better' }, 'Default'), h('th', null, 'File'), h('th', null, 'Role tags'), h('th', null, 'Keywords'), h('th', null, 'Skills found'), h('th', { 'data-tip': 'The dated copy JobPilot uploaded to each site, from Upload resumes to sites' }, 'On the sites'), h('th', { class: 'col-actions col-sticky' }, h('span', { class: 'sr-only' }, 'Actions')))),
         h('tbody', null, rows))));
   const foot = h('div', { class: 'small muted', style: { padding: '10px 14px', borderTop: '1px solid var(--border)', display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' } },
     h('span', null, 'Drop files on this table to upload them.'),
@@ -1734,7 +2252,7 @@ function newSearch() {
   const names = new Set(E.searches.map((s) => s.name));
   let name = 'New search'; let n = 2;
   while (names.has(name)) name = `New search ${n++}`;
-  return { name, enabled: true, keywords: '', location: 'United States', experience: ['entry'], posted: 'week', workplace: [], easyApplyOnly: true, sources: sources().map((s) => s.id), limit: 25, urls: { linkedin: '', handshake: '', indeed: '' } };
+  return { name, enabled: true, keywords: '', location: 'United States', experience: ['entry'], posted: 'week', workplace: [], easyApplyOnly: true, sources: chosenSiteIds(), limit: 25, urls: { linkedin: '', handshake: '', indeed: '' } };
 }
 
 function renderSearches() {
@@ -1845,7 +2363,7 @@ async function saveSearches() {
 
 // =================================================================== jobs
 
-const J = { status: 'all', site: 'all', q: '', sort: 'newest', selected: new Set(), open: new Set(), els: {} };
+const J = { status: 'all', site: 'all', q: '', sort: 'newest', selected: new Set(), open: new Set(), els: {}, highlight: null };
 
 function applyHow(j) {
   switch (j.applyType) {
@@ -1871,11 +2389,12 @@ function scoreFor(j, file) {
   return null;
 }
 const isWaitingTab = (j) => !!j.tabOpen && WAITING_STATUSES.has(j.status);
+const JOB_COLS = 8;
 
 function filteredJobs() {
   const q = J.q.trim().toLowerCase();
   let list = (S.jobs || []).filter((j) => {
-    if (J.status === 'tabs') { if (!isWaitingTab(j)) return false; } else if (J.status !== 'all' && j.status !== J.status) return false;
+    if (J.status === 'needs') { if (!WAITING_STATUSES.has(j.status)) return false; } else if (J.status !== 'all' && j.status !== J.status) return false;
     if (J.site !== 'all' && j.source !== J.site) return false;
     if (q && ![j.title, j.company, j.location, j.note, j.resume, j.search].some((x) => String(x || '').toLowerCase().includes(q))) return false;
     return true;
@@ -1892,7 +2411,9 @@ function filteredJobs() {
 
 function renderJobs() {
   const jobs = S.jobs || [];
+  closeMenu();
   if (!jobs.length) {
+    J.highlight = null;
     const hasSearch = (S.state?.setup?.searches || 0) > 0;
     view.replaceChildren(h('div', { class: 'view-inner' },
       pageHead('Jobs', 'Everything your searches found. Look them over, then apply.'),
@@ -1905,11 +2426,12 @@ function renderJobs() {
     return;
   }
   J.els.chips = h('div', { class: 'filter-chips', role: 'group', 'aria-label': 'Filter by status' });
+  J.els.statusSel = h('select', { class: 'input status-select', 'aria-label': 'Filter by status', onchange: (e) => { J.status = e.target.value; renderJobsBody(); } });
   J.els.count = h('span', { class: 'toolbar-count', role: 'status' });
   J.els.bulk = h('div', { class: 'bulkbar', hidden: true });
   J.els.tabs = h('div');
   J.els.tbody = h('tbody');
-  J.els.head = h('input', { type: 'checkbox', 'aria-label': 'Select all jobs shown', onchange: (e) => {
+  J.els.head = h('input', { type: 'checkbox', 'aria-label': 'Select all jobs shown', 'data-focus-key': 'selectAll', onchange: (e) => {
     for (const j of filteredJobs()) { if (e.target.checked) J.selected.add(j.key); else J.selected.delete(j.key); }
     renderJobsBody();
   } });
@@ -1927,6 +2449,7 @@ function renderJobs() {
     h('div', { class: 'toolbar' },
       J.els.chips,
       h('div', { class: 'toolbar-row' },
+        J.els.statusSel,
         h('div', { class: 'search-input' }, icon('search', 16), h('input', { class: 'input', type: 'search', value: J.q, placeholder: 'Search title, company, location or note', 'aria-label': 'Search jobs', oninput: (e) => { J.q = e.target.value; renderJobsBody(); } })),
         siteSel, sortSel, J.els.count)),
     J.els.bulk,
@@ -1934,8 +2457,10 @@ function renderJobs() {
       h('div', { class: 'table-wrap' },
         h('table', { class: 'table table-min-jobs jobs-table' },
           h('thead', null, h('tr', null,
-            h('th', { class: 'col-check' }, J.els.head), h('th', null, 'Job'), h('th', null, 'Company'), h('th', null, 'Site'), h('th', null, 'How to apply'),
-            h('th', null, 'Resume chosen'), h('th', { 'data-tip': 'How many of the skills the posting names are on your Profile skill list' }, 'Skills match'), h('th', null, 'Status'), h('th', null, 'Note'), h('th', null, h('span', { class: 'sr-only' }, 'Actions')))),
+            h('th', { class: 'col-check' }, J.els.head), h('th', { class: 'col-job' }, 'Job'),
+            h('th', { 'data-tip': 'Where each job stands, and the button for what to do next' }, 'Status'), h('th', null, 'Site'),
+            h('th', null, 'Resume chosen'), h('th', { 'data-tip': 'How many of the skills the posting names are on your Profile skill list' }, 'Skills match'), h('th', null, 'Note'),
+            h('th', { class: 'col-actions col-sticky' }, h('span', { class: 'sr-only' }, 'Actions')))),
           J.els.tbody)))));
   renderJobsBody();
 }
@@ -1953,33 +2478,45 @@ function howApplyingList() {
       h('li', null, 'When the site confirms the application, that tab closes by itself.'),
       h('li', null, 'If anything is unsure, the tab stays open and JobPilot moves on to the next job. That happens when a question needs your answer, an AI answer is waiting for your review, Submit is off, something went wrong, or the site never confirmed.'),
       h('li', null, `Once ${max} tabs are waiting, the run stops and asks you to finish those first. You can change that number in Settings.`),
-      h('li', null, 'After you finish a job in its tab, press "I submitted it" on that row so it goes into your applications sheet.'));
+      h('li', null, 'After you send one yourself in its tab, press "I sent it" on that row so it goes into your applications sheet. Press Show tab to find its tab.'));
 }
 
 function renderJobsBody() {
   if (!J.els.tbody) return;
+  closeMenu();
+  keepFocus(view, drawJobsBody);
+  if (J.highlight) flashJob(J.highlight);
+}
+
+function drawJobsBody() {
   const all = S.jobs || [];
   const keys = new Set(all.map((j) => j.key));
   for (const k of [...J.selected]) if (!keys.has(k)) J.selected.delete(k);
 
-  // waiting tabs banner
-  const waiting = all.filter(isWaitingTab);
+  // jobs that need you: the same count as the Jobs badge in the sidebar
+  const need = all.filter((j) => WAITING_STATUSES.has(j.status));
   const max = S.state?.settings?.maxOpenTabs ?? 8;
-  setKids(J.els.tabs, waiting.length ? h('div', { style: { marginBottom: '14px' } }, callout(waiting.length >= max ? 'warn' : 'info',
-    h('div', { class: 'callout-title' }, `${plural(waiting.length, 'job')} waiting for you in open tabs`),
-    h('p', null, `Finish each one in JobPilot's Chrome, then press "I submitted it" on its row, or Skip it. Apply stops once ${max} tabs are waiting.`),
-    h('div', null, btn(J.status === 'tabs' ? 'Show all jobs' : 'Show only these', { size: 'sm', onclick: () => { J.status = J.status === 'tabs' ? 'all' : 'tabs'; renderJobsBody(); } })))) : null);
+  const tabsOpen = Number.isFinite(S.state?.runner?.waitingTabs) ? S.state.runner.waitingTabs : all.filter(isWaitingTab).length;
+  setKids(J.els.tabs, need.length ? h('div', { style: { marginBottom: '14px' } }, callout(tabsOpen >= max ? 'warn' : 'info',
+    h('div', { class: 'callout-title' }, `${plural(need.length, 'job')} need${need.length === 1 ? 's' : ''} you`),
+    h('p', null, 'Each one has a button under its status. Press "Answer it" for a new question, or finish the form in JobPilot\'s Chrome and press "I sent it". Use the ⋯ menu to skip a job.'),
+    tabsOpen > 0 && h('p', { class: 'small' }, `${plural(tabsOpen, 'tab')} open in JobPilot's Chrome. Apply pauses when ${max} are open.`),
+    h('div', null, btn(J.status === 'needs' ? 'Show all jobs' : 'Show only these', { size: 'sm', attrs: { 'data-focus-key': 'needToggle' }, onclick: () => { J.status = J.status === 'needs' ? 'all' : 'needs'; renderJobsBody(); } })))) : null);
 
-  // chips
+  // status filter: chips on wide windows, a dropdown on narrow ones
   const counts = {};
   for (const j of all) counts[j.status] = (counts[j.status] || 0) + 1;
-  const chip = (id, label, n, tone, tip) => h('button', { type: 'button', class: ['fchip', tone && `tone-${tone}`, !n && 'is-zero'], 'aria-pressed': String(J.status === id), 'data-tip': tip, onclick: () => { J.status = id; renderJobsBody(); } },
-    tone && h('span', { class: 'pill-dot', 'aria-hidden': 'true' }), label, h('span', { class: 'fchip-n' }, String(n)));
   const extra = Object.keys(counts).filter((s) => !JOB_FILTERS.includes(s));
-  setKids(J.els.chips, 
-    chip('all', 'All', all.length, null, 'Every job'),
-    ...[...JOB_FILTERS, ...extra].map((s) => chip(s, STATUS[s]?.label || humanize(s), counts[s] || 0, STATUS[s]?.tone || 'gray', STATUS[s]?.tip)),
-    waiting.length ? chip('tabs', 'Waiting in a tab', waiting.length, 'violet', 'Jobs whose tab JobPilot left open for you') : null);
+  const filters = [
+    { id: 'all', label: 'All', n: all.length, tip: 'Every job' },
+    need.length ? { id: 'needs', label: 'Needs you', n: need.length, tone: 'amber', tip: 'Jobs waiting for you to answer, check or send' } : null,
+    ...[...JOB_FILTERS, ...extra].map((s) => ({ id: s, label: STATUS[s]?.label || humanize(s), n: counts[s] || 0, tone: STATUS[s]?.tone || 'gray', tip: STATUS[s]?.tip })),
+  ].filter(Boolean);
+  if (!filters.some((f) => f.id === J.status)) J.status = 'all';
+  setKids(J.els.chips, filters.map((f) => h('button', { type: 'button', class: ['fchip', f.tone && `tone-${f.tone}`, !f.n && 'is-zero'], 'aria-pressed': String(J.status === f.id), 'data-tip': f.tip, 'data-focus-key': `chip:${f.id}`, onclick: () => { J.status = f.id; renderJobsBody(); } },
+    f.tone && h('span', { class: 'pill-dot', 'aria-hidden': 'true' }), f.label, h('span', { class: 'fchip-n' }, String(f.n)))));
+  setKids(J.els.statusSel, filters.map((f) => h('option', { value: f.id }, `${f.label} (${f.n})`)));
+  J.els.statusSel.value = J.status;
 
   const list = filteredJobs();
   J.els.count.textContent = list.length === all.length ? plural(all.length, 'job') : `${list.length} of ${all.length} jobs`;
@@ -1990,7 +2527,7 @@ function renderJobsBody() {
   renderBulkbar();
 
   if (!list.length) {
-    J.els.tbody.replaceChildren(h('tr', null, h('td', { colspan: 10 }, emptyState({
+    J.els.tbody.replaceChildren(h('tr', null, h('td', { colspan: JOB_COLS }, emptyState({
       small: true, icon: 'search', title: 'No jobs match these filters',
       text: 'Try another status, site or search word.',
       actions: [btn('Clear filters', { onclick: () => { J.status = 'all'; J.site = 'all'; J.q = ''; renderJobs(); } })],
@@ -2005,6 +2542,19 @@ function renderJobsBody() {
   J.els.tbody.replaceChildren(...rows);
 }
 
+/** Scrolls to a job (from the Activity panel's View link) and flashes its row. */
+function flashJob(key) {
+  J.highlight = null;
+  requestAnimationFrame(() => {
+    const tr = J.els.tbody?.querySelector(`tr[data-row-key="${CSS.escape(key)}"]`);
+    if (!tr) { toast('That job is not on your list anymore.', 'info'); return; }
+    tr.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    tr.classList.add('is-flash');
+    setTimeout(() => tr.classList.remove('is-flash'), 2600);
+    tr.querySelector('[data-focus-key]')?.focus({ preventScroll: true });
+  });
+}
+
 function renderBulkbar() {
   const n = J.selected.size;
   const bar = J.els.bulk;
@@ -2012,7 +2562,7 @@ function renderBulkbar() {
   if (!n) { bar.replaceChildren(); return; }
   const keys = [...J.selected];
   const running = !!S.state?.runner?.task;
-  setKids(bar, 
+  setKids(bar,
     h('span', null, `${plural(n, 'job')} selected`),
     h('span', { class: 'spacer' }),
     btn('Apply to selected', { kind: 'primary', size: 'sm', icon: 'plane', attrs: runAttrs(false), disabled: running, tip: running ? 'Wait for the current task to finish' : 'Apply to just these jobs, in any status', onclick: async () => {
@@ -2044,17 +2594,61 @@ async function setJobStatus(j, status, note) {
   const patch = { status };
   if (note !== undefined) patch.note = note;
   const res = await api('POST', '/api/jobs/update', { key: j.key, patch }).catch(() => null);
+  if (!res) return false;
+  // changing the status closes the job's waiting tab
+  replaceJob({ tabOpen: false, ...res }, j.key);
+  pollState();
+  renderJobsBody();
+  return true;
+}
+
+const jobName = (j) => `${j.title || 'This job'} at ${j.company || 'this company'}`;
+
+async function markSubmitted(j) {
+  const label = sentLabel(j);
+  const ok = await confirmDialog({
+    title: label === 'I applied' ? 'Mark this job as applied?' : 'Mark this job as sent?',
+    body: [`${jobName(j)}.`, label === 'I applied'
+      ? 'Use this after you applied yourself. JobPilot adds it to your applications sheet so it never applies there again.'
+      : 'Use this after you sent the application yourself. JobPilot adds it to your applications sheet so it never applies there again.',
+    j.tabOpen ? 'JobPilot also closes its tab.' : null].filter(Boolean),
+    ok: label, icon: 'checkCircle',
+  });
+  if (!ok) return;
+  if (await setJobStatus(j, 'submitted', label === 'I applied' ? 'you applied yourself' : 'you sent it yourself')) {
+    toast('Marked as sent and added to your applications sheet.', 'success');
+  }
+}
+
+async function retryJob(j) {
+  if (await setJobStatus(j, 'saved', '')) toast(`${jobName(j)} is back to Saved. The next Apply tries it again.`, 'success');
+}
+
+async function skipJob(j) {
+  if (await setJobStatus(j, 'skipped', 'skipped by you')) toast(`Skipped ${jobName(j)}.`, 'info');
+}
+
+async function removeJob(j) {
+  const ok = await confirmDialog({ title: 'Remove this job?', body: `${jobName(j)} leaves your list. If a later search finds it again, it comes back.`, ok: 'Remove', danger: true, icon: 'trash' });
+  if (!ok) return;
+  const res = await api('POST', '/api/jobs/remove', { key: j.key }).catch(() => null);
   if (!res) return;
-  replaceJob(res, j.key);
+  S.jobs = S.jobs.filter((x) => x.key !== j.key);
+  J.selected.delete(j.key); J.open.delete(j.key);
+  toast('Removed from your list.', 'success');
   pollState();
   renderJobsBody();
 }
 
-async function markSubmitted(j) {
-  const ok = await confirmDialog({ title: 'Mark this job as submitted?', body: [`${j.title || 'This job'} at ${j.company || 'this company'}.`, 'Use this after you sent the application yourself in its tab. JobPilot adds it to your applications sheet so it never applies there again.'], ok: 'I submitted it', icon: 'checkCircle' });
-  if (!ok) return;
-  await setJobStatus(j, 'submitted', 'you finished it in the open tab');
-  toast('Marked as submitted and added to your applications sheet.', 'success');
+/** Brings the job's waiting tab to the front in JobPilot's Chrome. */
+async function showJobTab(j) {
+  let res;
+  try { res = await api('POST', '/api/jobs/show-tab', { key: j.key }, { quiet: true }); } catch (e) { res = { error: e.message }; }
+  if (res?.shown) { toast(`The tab for ${jobName(j)} is in front in JobPilot's Chrome.`, 'success'); return; }
+  const href = safeUrl(j.externalUrl) || safeUrl(j.url);
+  const msg = res?.error && !/no such endpoint/i.test(res.error) ? res.error : 'That tab is not open anymore.';
+  toast(msg, 'warn', href ? { action: { label: 'Open the posting', onclick: () => window.open(href, '_blank', 'noopener') } } : {});
+  if (!res?.error) { replaceJob({ tabOpen: false }, j.key); renderJobsBody(); }
 }
 
 async function changeResume(j, file, select) {
@@ -2067,20 +2661,25 @@ async function changeResume(j, file, select) {
   renderJobsBody();
 }
 
+function toggleDetails(j) {
+  if (J.open.has(j.key)) J.open.delete(j.key); else J.open.add(j.key);
+  renderJobsBody();
+}
+
 function resumeCell(j) {
   const files = (S.resumes || []).map((r) => r.file);
   const cur = j.resume || '';
   const options = [h('option', { value: '' }, 'Pick the best one at apply time'), ...files.map((f) => h('option', { value: f }, f))];
   if (cur && !files.includes(cur)) options.push(h('option', { value: cur }, `${cur} (file is gone)`));
-  const select = h('select', { class: 'input input-sm', 'aria-label': `Resume for ${j.title || 'this job'}`, value: cur, onchange: (e) => changeResume(j, e.target.value, e.target) }, options);
+  const select = h('select', { class: 'input input-sm', 'aria-label': `Resume for ${j.title || 'this job'}`, 'data-focus-key': `resume:${j.key}`, value: cur, onchange: (e) => changeResume(j, e.target.value, e.target) }, options);
   const score = scoreFor(j, cur);
   const original = j.ranking?.[0]?.file;
   const changed = cur && original && cur !== original;
   return h('div', { class: 'resume-cell' }, select,
     h('div', { class: 'resume-meta' },
       score != null && h('span', { class: 'score', 'data-tip': 'How well this resume fits, from role tags and shared words' }, `${Math.round(score * 100)}% fit`),
-      changed ? h('span', null, 'Picked by you') : null),
-    !changed && j.why && h('div', { class: 'resume-why clamp-2', 'data-tip': j.why }, j.why));
+      changed ? h('span', null, 'Picked by you') : null,
+      (j.why || (j.ranking || []).length > 0) && !J.open.has(j.key) && h('button', { type: 'button', class: 'link-btn small', 'data-focus-key': `why:${j.key}`, onclick: () => { J.open.add(j.key); renderJobsBody(); } }, 'Why this one?')));
 }
 
 function skillsCell(j) {
@@ -2091,63 +2690,95 @@ function skillsCell(j) {
   return h('div', { class: 'meter-cell', 'data-tip': tip, tabindex: 0 }, meter(s.pct), h('span', { class: 'meter-val' }, `${s.pct}%`), h('span', { class: 'sr-only' }, tip));
 }
 
+/** The one thing to do next for a job, shown under its status. */
+function nextSteps(j) {
+  const sent = { id: 'sent', label: sentLabel(j), icon: 'checkCircle', run: () => markSubmitted(j) };
+  const retry = { id: 'retry', label: 'Retry', icon: 'undo', tip: 'Set back to Saved so the next Apply tries it again', run: () => retryJob(j) };
+  switch (j.status) {
+    case 'needs_answer': return [{ id: 'answer', label: 'Answer it', icon: 'help', tip: 'Answer the new question on the Questions tab', run: () => go('questions') }];
+    case 'filled_not_submitted':
+    case 'needs_review':
+    case 'error': return [sent];
+    case 'blocked': return [retry];
+    case 'external_manual': {
+      const href = safeUrl(j.externalUrl) || safeUrl(j.url);
+      return [href && { id: 'site', label: 'Open company site', icon: 'external', href }, sent].filter(Boolean);
+    }
+    case 'applying': return runIdle() ? [retry] : [];
+    default: return [];
+  }
+}
+
+function stepButton(j, s) {
+  const name = `${s.label}: ${jobName(j)}`;
+  if (s.href) {
+    return h('a', { class: 'btn btn-sm btn-soft next-btn', href: s.href, target: '_blank', rel: 'noopener noreferrer', 'aria-label': name, 'data-focus-key': `${s.id}:${j.key}` }, icon(s.icon, 14), h('span', null, s.label));
+  }
+  return btn(s.label, { size: 'sm', kind: 'soft', icon: s.icon, tip: s.tip, onclick: onBusy(s.run), attrs: { 'aria-label': name, 'data-focus-key': `${s.id}:${j.key}`, class: 'btn btn-sm btn-soft next-btn' } });
+}
+
+/** Everything else you can do with a job, in the ⋯ menu. */
+function jobMenuItems(j) {
+  const primary = new Set(nextSteps(j).map((s) => s.id));
+  const href = safeUrl(j.url);
+  const ext = safeUrl(j.externalUrl);
+  return [
+    canMarkSent(j) && !primary.has('sent') && { label: sentLabel(j), icon: 'checkCircle', hint: 'Adds it to your applications sheet', onclick: () => markSubmitted(j) },
+    canRetry(j) && !primary.has('retry') && { label: 'Retry', icon: 'undo', hint: 'The next Apply tries it again', onclick: () => retryJob(j) },
+    canSkip(j) && { label: 'Skip this job', icon: 'skip', hint: 'Apply leaves it alone', onclick: () => skipJob(j) },
+    j.tabOpen && { label: 'Show its tab', icon: 'tab', onclick: () => showJobTab(j) },
+    href && { label: 'Open the posting', icon: 'external', href },
+    ext && !primary.has('site') && { label: 'Open the company page', icon: 'external', href: ext },
+    { label: J.open.has(j.key) ? 'Hide details' : 'Show details', icon: J.open.has(j.key) ? 'chevronDown' : 'chevronRight', onclick: () => toggleDetails(j) },
+    { label: 'Remove from the list', icon: 'trash', danger: true, onclick: () => removeJob(j) },
+  ];
+}
+
 function jobRow(j) {
   const sel = J.selected.has(j.key);
-  const href = safeUrl(j.externalUrl) || safeUrl(j.url);
+  const href = safeUrl(j.url) || safeUrl(j.externalUrl);
   const isOpen = J.open.has(j.key);
   const drafts = Array.isArray(j.drafts) ? j.drafts : [];
-  const toggle = h('button', { type: 'button', class: 'icon-btn', 'aria-expanded': String(isOpen), 'aria-label': isOpen ? 'Hide details' : 'Show details', 'data-tip': isOpen ? 'Hide details' : 'Show details', onclick: () => { if (isOpen) J.open.delete(j.key); else J.open.add(j.key); renderJobsBody(); } }, icon(isOpen ? 'chevronDown' : 'chevronRight', 16));
+  const toggle = h('button', { type: 'button', class: 'icon-btn', 'aria-expanded': String(isOpen), 'aria-label': `${isOpen ? 'Hide' : 'Show'} details for ${j.title || 'this job'}`, 'data-tip': isOpen ? 'Hide details' : 'Show details', 'data-focus-key': `details:${j.key}`, onclick: () => toggleDetails(j) }, icon(isOpen ? 'chevronDown' : 'chevronRight', 16));
   const meta = [j.location, j.search && `from "${j.search}"`].filter(Boolean).join(' · ');
-  return h('tr', { class: sel && 'is-selected' },
-    h('td', { class: 'col-check' }, h('input', { type: 'checkbox', checked: sel, 'aria-label': `Select ${j.title || 'job'}`, onchange: (e) => { if (e.target.checked) J.selected.add(j.key); else J.selected.delete(j.key); renderJobsBody(); } })),
-    h('td', null, h('div', { style: { display: 'flex', gap: '6px', alignItems: 'flex-start' } }, toggle,
-      h('div', { style: { minWidth: '0', maxWidth: '300px' } },
-        href ? h('a', { class: 'cell-title', href: safeUrl(j.url) || href, target: '_blank', rel: 'noopener noreferrer' }, j.title || 'Untitled job') : h('div', { class: 'cell-title' }, j.title || 'Untitled job'),
+  const steps = nextSteps(j);
+  return h('tr', { class: [sel && 'is-selected', isOpen && 'is-open'], 'data-row-key': j.key },
+    h('td', { class: 'col-check' }, h('input', { type: 'checkbox', checked: sel, 'aria-label': `Select ${j.title || 'job'}`, 'data-focus-key': `select:${j.key}`, onchange: (e) => { if (e.target.checked) J.selected.add(j.key); else J.selected.delete(j.key); renderJobsBody(); } })),
+    h('td', { class: 'col-job' }, h('div', { class: 'job-cell' }, toggle,
+      h('div', { class: 'job-cell-text' },
+        href ? h('a', { class: 'cell-title', href, target: '_blank', rel: 'noopener noreferrer', 'data-focus-key': `title:${j.key}` }, j.title || 'Untitled job') : h('div', { class: 'cell-title' }, j.title || 'Untitled job'),
+        h('div', { class: 'cell-company' }, j.company || 'Unknown company'),
         meta && h('div', { class: 'cell-sub' }, meta)))),
-    h('td', null, h('div', { style: { fontWeight: '550', maxWidth: '180px' } }, j.company || 'Unknown company')),
-    h('td', null, siteBadge(j.source)),
-    h('td', null, h('span', { 'data-tip': APPLY_TIP[j.applyType] || null, class: 'small' }, applyHow(j))),
+    h('td', null, h('div', { class: 'status-cell' },
+      statusPill(j.status),
+      steps.length > 0 && h('div', { class: 'next-steps' }, steps.map((s) => stepButton(j, s))),
+      j.tabOpen && btn('Show tab', { size: 'sm', kind: 'ghost', icon: 'tab', tip: 'Bring this job\'s tab to the front in JobPilot\'s Chrome', onclick: onBusy(() => showJobTab(j)), attrs: { 'aria-label': `Show the tab for ${jobName(j)}`, 'data-focus-key': `tab:${j.key}`, class: 'btn btn-sm btn-ghost tab-btn' } }),
+      drafts.length > 0 && h('button', { type: 'button', class: 'link-btn small', 'data-focus-key': `drafts:${j.key}`, onclick: () => { J.open.add(j.key); renderJobsBody(); } }, `Read ${plural(drafts.length, 'AI answer')}`))),
+    h('td', null, siteBadge(j.source), h('div', { class: 'cell-sub', 'data-tip': APPLY_TIP[j.applyType] || null }, applyHow(j))),
     h('td', null, resumeCell(j)),
     h('td', null, skillsCell(j)),
-    h('td', null, h('div', { style: { display: 'flex', flexDirection: 'column', gap: '5px', alignItems: 'flex-start' } },
-      statusPill(j.status),
-      isWaitingTab(j) && h('span', { class: 'tag', 'data-tip': 'JobPilot left this job\'s tab open in its Chrome for you' }, icon('tab', 12), ' Tab open'),
-      drafts.length > 0 && h('button', { type: 'button', class: 'link-btn small', onclick: () => { J.open.add(j.key); renderJobsBody(); } }, `Read ${plural(drafts.length, 'AI answer')}`))),
-    h('td', null, j.note ? h('div', { class: 'cell-note clamp-2', 'data-tip': j.note }, j.note) : h('span', { class: 'small muted' }, ''),
-      j.status === 'needs_answer' && h('button', { type: 'button', class: 'link-btn small', onclick: () => go('questions') }, 'Answer on Questions')),
-    h('td', { class: 'col-actions' }, h('div', { class: 'row-actions' },
-      href && h('a', { class: 'icon-btn', href, target: '_blank', rel: 'noopener noreferrer', 'aria-label': j.externalUrl ? 'Open the company application page' : 'Open the posting', 'data-tip': j.externalUrl ? 'Open the company application page' : 'Open the posting' }, icon('external', 16)),
-      CAN_MARK_SUBMITTED.has(j.status) && iconBtn('checkCircle', 'I submitted it', () => markSubmitted(j)),
-      j.status !== 'skipped' && j.status !== 'submitted' && iconBtn('skip', 'Skip this job', () => setJobStatus(j, 'skipped', 'skipped by you')),
-      j.status !== 'saved' && j.status !== 'submitted' && j.status !== 'applying' && iconBtn('undo', 'Retry', () => setJobStatus(j, 'saved', '')),
-      iconBtn('trash', 'Remove from the list', async () => {
-        const ok = await confirmDialog({ title: 'Remove this job?', body: `${j.title || 'This job'} at ${j.company || 'this company'} leaves your list. If a later search finds it again, it comes back.`, ok: 'Remove', danger: true, icon: 'trash' });
-        if (!ok) return;
-        const res = await api('POST', '/api/jobs/remove', { key: j.key }).catch(() => null);
-        if (!res) return;
-        S.jobs = S.jobs.filter((x) => x.key !== j.key);
-        J.selected.delete(j.key); J.open.delete(j.key);
-        toast('Removed from your list.', 'success');
-        pollState();
-        renderJobsBody();
-      }, { kind: 'danger' }))));
+    h('td', null, j.note ? h('div', { class: 'cell-note clamp-2', 'data-tip': j.note }, j.note) : h('span', { class: 'small muted' }, '')),
+    h('td', { class: 'col-actions col-sticky' }, h('div', { class: 'row-actions' },
+      href && h('a', { class: 'icon-btn', href, target: '_blank', rel: 'noopener noreferrer', 'aria-label': `Open the posting for ${j.title || 'this job'}`, 'data-tip': 'Open the posting', 'data-focus-key': `open:${j.key}` }, icon('external', 16)),
+      moreBtn(`More actions for ${j.title || 'this job'}`, () => jobMenuItems(j), `more:${j.key}`))));
 }
 
 function jobDetailRow(j) {
   const drafts = Array.isArray(j.drafts) ? j.drafts : [];
   const s = j.skills || {};
   const facts = [
+    ['Company', j.company],
     ['Found', j.firstSeen ? fmtDateTime(j.firstSeen) : ''],
     ['Search', j.search],
     ['Applied with', j.appliedWith],
     ['Last tried', j.appliedAt ? fmtDateTime(j.appliedAt) : ''],
     ['Saved on the site too', j.savedOnSite === 'saved' || j.savedOnSite === 'already' ? 'Yes' : ''],
   ].filter(([, v]) => v);
-  return h('tr', { class: 'detail-row' }, h('td', { colspan: 10 },
+  return h('tr', { class: 'detail-row', 'data-row-key': `${j.key}:detail` }, h('td', { colspan: JOB_COLS },
     h('div', { class: 'job-detail' },
       drafts.length > 0 && h('div', { class: 'detail-block detail-drafts' },
         h('h3', { class: 'detail-title' }, icon('sparkle', 15), `What AI wrote (${drafts.length})`),
-        h('p', { class: 'small muted' }, j.status === 'needs_review' ? 'These answers are already typed into the form. Read them in the open tab, edit anything you like there, then submit.' : 'These answers were typed into the form for this job.'),
+        h('p', { class: 'small muted' }, j.status === 'needs_review' ? 'These answers are already typed into the form. Read them in the open tab, edit anything you like there, then send it.' : 'These answers were typed into the form for this job.'),
         drafts.map((d) => h('div', { class: 'draft' }, h('div', { class: 'draft-q' }, d.question || 'Question'), h('div', { class: 'draft-a' }, d.answer || '')))),
       h('div', { class: 'detail-grid' },
         h('div', { class: 'detail-block' },
@@ -2168,8 +2799,8 @@ function jobDetailRow(j) {
           h('div', { class: 'detail-actions' },
             safeUrl(j.url) && h('a', { class: 'btn btn-sm', href: j.url, target: '_blank', rel: 'noopener noreferrer' }, icon('external', 14), h('span', null, 'Open posting')),
             safeUrl(j.externalUrl) && h('a', { class: 'btn btn-sm', href: j.externalUrl, target: '_blank', rel: 'noopener noreferrer' }, icon('external', 14), h('span', null, 'Open company page')),
-            CAN_MARK_SUBMITTED.has(j.status) && btn('I submitted it', { size: 'sm', icon: 'checkCircle', onclick: () => markSubmitted(j) }),
-            j.status !== 'saved' && j.status !== 'submitted' && j.status !== 'applying' && btn('Retry', { size: 'sm', icon: 'undo', onclick: () => setJobStatus(j, 'saved', '') })))))));
+            canMarkSent(j) && btn(sentLabel(j), { size: 'sm', icon: 'checkCircle', onclick: () => markSubmitted(j) }),
+            canRetry(j) && btn('Retry', { size: 'sm', icon: 'undo', tip: 'Set back to Saved so the next Apply tries it again', onclick: () => retryJob(j) })))))));
 }
 
 // ============================================================== questions
@@ -2180,7 +2811,7 @@ function renderQuestions() {
   const list = S.review || [];
   view.replaceChildren(h('div', { class: 'view-inner narrow' },
     pageHead('Questions', 'Questions a form asked that JobPilot could not answer yet.', list.length ? [pill(plural(list.length, 'question') + ' waiting', 'amber')] : null),
-    callout('info', 'Answer each one once. JobPilot saves your answer to your Answers list and reuses it on every form that asks the same thing. Jobs that were only waiting on these go back to Saved, so the next Apply tries them again.'),
+    callout('info', 'Answer each one once. JobPilot keeps your answer in Saved answers and reuses it on every form that asks the same thing. Jobs that were only waiting on these go back to Saved, so the next Apply tries them again.'),
     h('div', { class: 'q-list', style: { marginTop: '16px' } },
       list.length ? list.map(questionCard) : h('section', { class: 'card' }, emptyState({ icon: 'checkCircle', title: 'No questions waiting', text: 'You are all caught up. When a form asks something new during Apply, it shows up here for you to answer.' })))));
 }
@@ -2231,14 +2862,20 @@ function questionCard(q) {
       jobs.length > 6 && h('li', { class: 'muted' }, `and ${jobs.length - 6} more`))),
     h('div', { class: 'q-foot' },
       saveBtn,
-      btn('Skip this question', { kind: 'ghost', tip: 'JobPilot leaves this question blank from now on', onclick: onBusy(() => answerQuestion(q, '', 'skip')) }),
+      btn('Always leave blank', { kind: 'ghost', tip: 'JobPilot leaves this question blank on every form from now on', onclick: onBusy(async () => {
+        if (q.required) {
+          const ok = await confirmDialog({ title: 'Leave a required question blank?', body: 'This question is required, so forms that ask it can\'t be sent. Leave it blank anyway?', ok: 'Leave it blank', cancel: 'Go back', danger: true, icon: 'alert' });
+          if (!ok) return;
+        }
+        await answerQuestion(q, '', 'skip');
+      }) }),
       h('span', { class: 'spacer' }),
-      btn('Dismiss', { kind: 'ghost', tip: 'Remove it from this list without saving an answer. It comes back if a form asks it again.', onclick: onBusy(async () => {
+      btn('Not now', { kind: 'ghost', tip: 'Hide it for now without saving an answer. It comes back if a form asks it again.', onclick: onBusy(async () => {
         const res = await api('POST', '/api/review/dismiss', { id: q.id }).catch(() => undefined);
         if (res === undefined) return;
         S.review = S.review.filter((x) => x.id !== q.id);
         delete Q.drafts[q.id];
-        toast('Dismissed. It comes back if a form asks it again.', 'info');
+        toast('Hidden for now. It comes back if a form asks it again.', 'info');
         await pollState();
         rerender();
       }) })));
@@ -2251,10 +2888,15 @@ async function answerQuestion(q, answer, type) {
   if (!res) return;
   const others = new Set((S.review || []).filter((x) => x.id !== q.id).flatMap((x) => (x.jobs || []).map((j) => j.key)));
   const ready = (q.jobs || []).filter((j) => !others.has(j.key)).length;
+  // jobs from this question whose form is still open in JobPilot's Chrome
+  const tabs = (q.jobs || []).filter((qj) => (S.jobs || []).find((j) => j.key === qj.key)?.tabOpen).length;
   S.review = S.review.filter((x) => x.id !== q.id);
   delete Q.drafts[q.id];
-  const head = type === 'skip' ? 'Skipped. JobPilot will leave this question blank from now on.' : 'Saved. JobPilot will use this answer from now on.';
-  toast(ready ? `${head} ${plural(ready, 'job')} went back to Saved and will be retried on the next Apply.` : head, 'success', { timeout: 7000 });
+  const head = type === 'skip' ? 'Done. JobPilot will leave this question blank from now on.' : 'Saved. JobPilot will use this answer from now on.';
+  const parts = [head];
+  if (ready) parts.push(`${plural(ready, 'job')} went back to Saved and will be retried on the next Apply.`);
+  if (tabs) parts.push(tabs === 1 ? 'You can close its tab in JobPilot\'s Chrome.' : 'You can close their tabs in JobPilot\'s Chrome.');
+  toast(parts.join(' '), 'success', { timeout: 9000 });
   await pollState();
   rerender();
 }
@@ -2264,31 +2906,54 @@ async function answerQuestion(q, answer, type) {
 const SH = { q: '', status: 'all', source: 'all' };
 const SHEET_SPECIAL = new Set(['timestamp', 'source', 'title', 'company', 'location', 'resume', 'match_score', 'status', 'notes', 'job_url', 'apply_url', 'job_id']);
 
+const SENT_STATUSES = new Set(['submitted', 'applied']);
+
+/**
+ * One row per job: the newest row wins, matched on the posting link, or on
+ * title and company when there is no link. Rows come newest first.
+ */
+function groupSheetRows(rows) {
+  const groups = new Map();
+  for (const r of rows) {
+    const url = String(r.job_url || '').trim().toLowerCase();
+    const key = url || `${String(r.title || '').trim().toLowerCase()}|${String(r.company || '').trim().toLowerCase()}`;
+    const g = groups.get(key);
+    if (g) g.history.push(r); else groups.set(key, { row: r, history: [r] });
+  }
+  return [...groups.values()];
+}
+
 function renderSheet() {
-  const { header = [], rows = [] } = S.sheet || {};
+  const { header = [], rows: allRows = [] } = S.sheet || {};
   const ws = S.state?.workspace || 'your JobPilot folder';
   const sep = /\\/.test(ws) ? '\\' : '/';
+  const groups = groupSheetRows(allRows);
+  const rows = groups.map((g) => g.row);
   const statuses = [...new Set(rows.map((r) => r.status).filter(Boolean))].sort();
   const srcs = [...new Set(rows.map((r) => r.source).filter(Boolean))].sort();
   const tbody = h('tbody');
   const count = h('span', { class: 'toolbar-count', role: 'status' });
   const extra = header.filter((k) => !SHEET_SPECIAL.has(k));
+  if (SH.status !== 'all' && !statuses.includes(SH.status)) SH.status = 'all';
+  const sentN = rows.filter((r) => SENT_STATUSES.has(r.status)).length;
 
   const draw = () => {
     const q = SH.q.trim().toLowerCase();
-    const list = rows.filter((r) => (SH.status === 'all' || r.status === SH.status)
+    const list = groups.filter(({ row: r }) => (SH.status === 'all' || r.status === SH.status)
       && (SH.source === 'all' || r.source === SH.source)
       && (!q || Object.values(r).some((v) => String(v).toLowerCase().includes(q))));
-    count.textContent = list.length === rows.length ? plural(rows.length, 'row') : `${list.length} of ${rows.length} rows`;
+    count.textContent = `${list.length === rows.length ? plural(rows.length, 'job') : `${list.length} of ${plural(rows.length, 'job')}`}, ${sentN} sent`;
     if (!list.length) {
       tbody.replaceChildren(h('tr', null, h('td', { colspan: 10 + extra.length }, emptyState({ small: true, icon: 'search', title: 'No rows match', text: 'Try another status, site or search word.' }))));
       return;
     }
-    tbody.replaceChildren(...list.map((r) => {
+    tbody.replaceChildren(...list.map(({ row: r, history }) => {
       const score = Number(r.match_score);
       const links = [['job_url', 'Posting'], ['apply_url', 'Apply page']].filter(([k]) => safeUrl(r[k]));
+      const past = history.length > 1 ? history.map((x) => `${fmtDateTime(x.timestamp)}: ${STATUS[x.status]?.label || humanize(x.status)}`).join('\n') : '';
       return h('tr', null,
-        h('td', { style: { whiteSpace: 'nowrap' } }, h('span', { 'data-tip': r.timestamp }, fmtDateTime(r.timestamp))),
+        h('td', { style: { whiteSpace: 'nowrap' } }, h('span', { 'data-tip': r.timestamp }, fmtDateTime(r.timestamp)),
+          past && h('div', { class: 'cell-sub', 'data-tip': past, tabindex: 0, 'aria-label': `${history.length} entries for this job: ${past.replace(/\n/g, ', ')}` }, `${history.length} entries`)),
         h('td', null, siteBadge(r.source)),
         h('td', null, h('div', { class: 'cell-title', style: { maxWidth: '280px' } }, r.title)),
         h('td', null, r.company),
@@ -2298,12 +2963,12 @@ function renderSheet() {
         h('td', null, statusPill(r.status)),
         h('td', null, r.notes ? h('div', { class: 'cell-note clamp-2', 'data-tip': r.notes }, r.notes) : ''),
         ...extra.map((k) => h('td', { class: 'small' }, r[k] || '')),
-        h('td', { class: 'col-actions' }, h('div', { class: 'row-actions' }, links.map(([k, label]) => h('a', { class: 'icon-btn', href: r[k], target: '_blank', rel: 'noopener noreferrer', 'aria-label': `Open the ${label.toLowerCase()}`, 'data-tip': `Open the ${label.toLowerCase()}` }, icon('external', 16))))));
+        h('td', { class: 'col-actions col-sticky' }, h('div', { class: 'row-actions' }, links.map(([k, label]) => h('a', { class: 'icon-btn', href: r[k], target: '_blank', rel: 'noopener noreferrer', 'aria-label': `Open the ${label.toLowerCase()}`, 'data-tip': `Open the ${label.toLowerCase()}` }, icon('external', 16))))));
     }));
   };
 
   view.replaceChildren(h('div', { class: 'view-inner' },
-    pageHead('Applications', 'Every application attempt, newest first.', [
+    pageHead('Applications', 'Every job JobPilot applied to or filled in for you, newest first. Each job shows once, with its latest status.', [
       h('a', { class: 'btn btn-primary', href: '/api/sheet.csv', download: 'applications.csv' }, icon('download', 16), h('span', null, 'Download CSV')),
     ]),
     h('div', { style: { marginBottom: '14px', flex: 'none' } }, callout('neutral',
@@ -2312,11 +2977,11 @@ function renderSheet() {
     rows.length ? [
       h('div', { class: 'toolbar' }, h('div', { class: 'toolbar-row' },
         h('div', { class: 'search-input' }, icon('search', 16), h('input', { class: 'input', type: 'search', value: SH.q, placeholder: 'Search any column', 'aria-label': 'Search applications', oninput: (e) => { SH.q = e.target.value; draw(); } })),
-        h('select', { class: 'input', value: SH.status, 'aria-label': 'Filter by status', onchange: (e) => { SH.status = e.target.value; draw(); } }, h('option', { value: 'all' }, 'All statuses'), statuses.map((s) => h('option', { value: s }, STATUS[s]?.label || humanize(s)))),
+        h('select', { class: 'input', value: statuses.includes(SH.status) ? SH.status : 'all', 'aria-label': 'Filter by status', onchange: (e) => { SH.status = e.target.value; draw(); } }, h('option', { value: 'all' }, 'All statuses'), statuses.map((s) => h('option', { value: s }, STATUS[s]?.label || humanize(s)))),
         h('select', { class: 'input', value: SH.source, 'aria-label': 'Filter by site', onchange: (e) => { SH.source = e.target.value; draw(); } }, h('option', { value: 'all' }, 'All sites'), srcs.map((s) => h('option', { value: s }, siteLabel(s)))),
         count)),
       h('section', { class: 'table-card' }, h('div', { class: 'table-wrap' }, h('table', { class: 'table table-min-sheet' },
-        h('thead', null, h('tr', null, h('th', null, 'When'), h('th', null, 'Site'), h('th', null, 'Job'), h('th', null, 'Company'), h('th', null, 'Location'), h('th', null, 'Resume'), h('th', { class: 'num' }, 'Match'), h('th', null, 'Status'), h('th', null, 'Notes'), extra.map((k) => h('th', null, humanize(k))), h('th', null, h('span', { class: 'sr-only' }, 'Links')))),
+        h('thead', null, h('tr', null, h('th', null, 'When'), h('th', null, 'Site'), h('th', null, 'Job'), h('th', null, 'Company'), h('th', null, 'Location'), h('th', null, 'Resume'), h('th', { class: 'num' }, 'Match'), h('th', null, 'Status'), h('th', null, 'Notes'), extra.map((k) => h('th', null, humanize(k))), h('th', { class: 'col-actions col-sticky' }, h('span', { class: 'sr-only' }, 'Links')))),
         tbody))),
     ] : h('section', { class: 'card' }, emptyState({ icon: 'table', title: 'No applications yet', text: 'Each time JobPilot applies to a job, or fills a form for you to send, a row is added here. Press Apply to saved jobs in the top bar to start.' }))));
   if (rows.length) draw();
@@ -2329,7 +2994,11 @@ function patternError(p) {
   try { new RegExp(p, 'i'); return ''; } catch (e) { return `This is not a valid pattern: ${e.message}`; }
 }
 
-const A = { test: '' };
+const A = { test: '', showRule: new WeakSet(), fresh: new WeakSet(), autoRule: new WeakSet() };
+/** A matching rule for a question, made the same way JobPilot makes one when you answer on the Questions tab. */
+const ruleFor = (q) => { const n = normalizeLabel(q); return n ? `^${n.split(' ').slice(0, 12).join(' ')}` : ''; };
+const ANSWER_TYPE = { skip: 'Leave it blank', check: 'Tick the box' };
+
 function renderAnswers() {
   const rows = E.answers;
   const tbody = h('tbody');
@@ -2347,52 +3016,95 @@ function renderAnswers() {
     if (hit >= 0) {
       tbody.querySelector(`tr[data-i="${hit}"]`)?.classList.add('is-hit');
       const e = rows[hit];
-      result.replaceChildren(h('span', { class: 'status-line ok' }, icon('checkCircle', 16), `Row ${hit + 1} answers it: `, e.type === 'skip' ? 'the question is skipped.' : e.type === 'check' ? 'the checkbox is ticked.' : `"${e.answer}"`));
+      result.replaceChildren(h('span', { class: 'status-line ok' }, icon('checkCircle', 16), `Row ${hit + 1} answers it: `, e.type === 'skip' ? 'the question is left blank.' : e.type === 'check' ? 'the box is ticked.' : `"${e.answer}"`));
     } else {
-      result.replaceChildren(h('span', { class: 'status-line idle' }, icon('info', 16), 'No row matches. Your profile or skills may answer it. If not, it goes to the Questions tab.'));
+      result.replaceChildren(h('span', { class: 'status-line idle' }, icon('info', 16), 'No saved answer matches. Your profile or skills may answer it. If not, it goes to the Questions tab.'));
     }
     result.append(h('div', { class: 'tester-norm' }, 'JobPilot checks this text: ', h('span', { class: 'mono' }, n || '(empty)')));
   };
 
+  const moveTo = (i, d, act) => {
+    [rows[i], rows[i + d]] = [rows[i + d], rows[i]];
+    markDirty('answers'); draw(); runTest(); hideTip();
+    const tr = tbody.querySelector(`tr[data-i="${i + d}"]`);
+    let b = tr?.querySelector(`[data-act="${act}"]`);
+    if (!b || b.disabled) b = tr?.querySelector(`[data-act="${act === 'up' ? 'down' : 'up'}"]`);
+    b?.focus({ preventScroll: true });
+    b?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  };
+
   const draw = () => {
     if (!rows.length) {
-      tbody.replaceChildren(h('tr', null, h('td', { colspan: 6 }, emptyState({ small: true, icon: 'list', title: 'No answers yet', text: 'Answers you give on the Questions tab are added here. You can also add your own.' }))));
+      tbody.replaceChildren(h('tr', null, h('td', { colspan: 5 }, emptyState({ small: true, icon: 'list', title: 'No saved answers yet', text: 'Answers you give on the Questions tab are added here. You can also add your own.' }))));
       return;
     }
     tbody.replaceChildren(...rows.map((e, i) => {
       const err = h('div', { class: 'ans-err', hidden: true });
-      const pat = h('input', { class: 'input input-sm input-mono', value: e.pattern || '', placeholder: '^why do you want to work here', 'aria-label': `Pattern for row ${i + 1}`, spellcheck: 'false', oninput: (ev) => {
-        e.pattern = ev.target.value; const msg = patternError(e.pattern); pat.classList.toggle('is-invalid', !!msg); err.textContent = msg; err.hidden = !msg; markDirty('answers'); runTest();
+      const pat = h('input', { class: 'input input-sm input-mono', value: e.pattern || '', placeholder: '^why do you want to work here', 'aria-label': `Matching rule for row ${i + 1}`, spellcheck: 'false', oninput: (ev) => {
+        e.pattern = ev.target.value; A.autoRule.delete(e); const msg = patternError(e.pattern); pat.classList.toggle('is-invalid', !!msg); err.textContent = msg; err.hidden = !msg; markDirty('answers'); runTest();
       } });
       const msg = patternError(e.pattern);
       if (msg) { pat.classList.add('is-invalid'); err.textContent = msg; err.hidden = false; }
-      return h('tr', { dataset: { i: String(i) } },
+      const fresh = A.fresh.has(e);
+      const open = fresh || !!msg || A.showRule.has(e);
+      const rule = h('div', { class: 'ans-rule', hidden: !open },
+        h('label', { class: 'small muted', for: pat.id || (pat.id = nextId('pat')) }, 'Matching rule (advanced). JobPilot uses this answer when a question matches it.'),
+        pat, err);
+      const ruleBtn = h('button', { type: 'button', class: 'link-btn small', 'aria-expanded': String(open), 'data-focus-key': `rule:${uid(e)}`, onclick: () => {
+        const on = rule.hidden;
+        rule.hidden = !on;
+        ruleBtn.setAttribute('aria-expanded', String(on));
+        ruleBtn.textContent = on ? 'Hide matching rule' : 'Show matching rule';
+        if (on) A.showRule.add(e); else A.showRule.delete(e);
+      } }, open ? 'Hide matching rule' : 'Show matching rule');
+      const question = fresh
+        ? h('input', { class: 'input input-sm', value: e.q ?? '', placeholder: 'The question, as the form asks it', 'aria-label': `Question for row ${i + 1}`, 'data-focus-key': `q:${uid(e)}`, oninput: (ev) => {
+          e.q = ev.target.value; markDirty('answers');
+          // the rule follows the question until you change the rule yourself
+          if (!e.pattern || A.autoRule.has(e)) {
+            e.pattern = ruleFor(e.q); A.autoRule.add(e); pat.value = e.pattern;
+            const m = patternError(e.pattern); pat.classList.toggle('is-invalid', !!m); err.textContent = m; err.hidden = !m; runTest();
+          }
+        } })
+        : h('div', { class: ['ans-q', !e.q && 'muted'] }, e.q || 'No question text saved');
+      const up = iconBtn('arrowUp', `Move row ${i + 1} up`, () => moveTo(i, -1, 'up'), { disabled: i === 0 });
+      const down = iconBtn('arrowDown', `Move row ${i + 1} down`, () => moveTo(i, 1, 'down'), { disabled: i === rows.length - 1 });
+      const del = iconBtn('trash', `Delete row ${i + 1}`, () => {
+        rows.splice(i, 1); markDirty('answers'); draw(); runTest(); hideTip();
+        const tr = tbody.querySelector(`tr[data-i="${Math.min(i, rows.length - 1)}"]`);
+        tr?.querySelector('[data-act="del"]')?.focus({ preventScroll: true });
+        if (e.q || e.answer) toast(`Deleted the answer for "${String(e.q || e.answer).slice(0, 60)}".`, 'info', { action: { label: 'Undo', onclick: () => { const cur = E.answers; if (!cur) return; cur.splice(Math.min(i, cur.length), 0, e); markDirty('answers'); if (S.tab === 'answers') rerender(); } } });
+      }, { kind: 'danger' });
+      up.dataset.act = 'up'; down.dataset.act = 'down'; del.dataset.act = 'del';
+      up.dataset.focusKey = `up:${uid(e)}`; down.dataset.focusKey = `down:${uid(e)}`;
+      return h('tr', { dataset: { i: String(i), rowKey: `ans:${uid(e)}` } },
         h('td', { class: 'col-n' }, String(i + 1)),
-        h('td', { style: { minWidth: '240px' } }, pat, err),
-        h('td', { style: { minWidth: '220px' } }, h('input', { class: 'input input-sm', value: e.answer ?? '', placeholder: e.type === 'skip' ? 'Not needed when skipping' : 'The answer to fill in', 'aria-label': `Answer for row ${i + 1}`, oninput: (ev) => { e.answer = ev.target.value; markDirty('answers'); runTest(); } })),
-        h('td', { class: 'col-type' }, h('select', { class: 'input input-sm', value: e.type || '', 'aria-label': `Type for row ${i + 1}`, onchange: (ev) => { if (ev.target.value) e.type = ev.target.value; else delete e.type; markDirty('answers'); draw(); runTest(); } },
-          h('option', { value: '' }, 'Fill in the answer'), h('option', { value: 'skip' }, 'Skip the question'), h('option', { value: 'check' }, 'Tick the checkbox'))),
-        h('td', { style: { minWidth: '180px' } }, h('input', { class: 'input input-sm', value: e.q ?? '', placeholder: 'A note for you', 'aria-label': `Note for row ${i + 1}`, oninput: (ev) => { e.q = ev.target.value; markDirty('answers'); } })),
-        h('td', { class: 'col-actions' }, h('div', { class: 'row-actions' },
-          iconBtn('arrowUp', 'Move up', () => { [rows[i - 1], rows[i]] = [rows[i], rows[i - 1]]; markDirty('answers'); draw(); runTest(); }, { disabled: i === 0 }),
-          iconBtn('arrowDown', 'Move down', () => { [rows[i + 1], rows[i]] = [rows[i], rows[i + 1]]; markDirty('answers'); draw(); runTest(); }, { disabled: i === rows.length - 1 }),
-          iconBtn('trash', 'Delete this answer', () => { rows.splice(i, 1); markDirty('answers'); draw(); runTest(); }, { kind: 'danger' }))));
+        h('td', { class: 'ans-q-cell' }, question, h('div', { class: 'ans-rule-toggle' }, ruleBtn), rule),
+        h('td', { style: { minWidth: '220px' } }, h('input', { class: 'input input-sm', value: e.answer ?? '', disabled: e.type === 'skip', placeholder: e.type === 'skip' ? 'Left blank on every form' : e.type === 'check' ? 'Not needed for a checkbox' : 'The answer to fill in', 'aria-label': `Your answer for row ${i + 1}`, 'data-focus-key': `a:${uid(e)}`, oninput: (ev) => { e.answer = ev.target.value; markDirty('answers'); runTest(); } })),
+        h('td', { class: 'col-type' }, h('select', { class: 'input input-sm', value: e.type || '', 'aria-label': `How to answer row ${i + 1}`, 'data-focus-key': `type:${uid(e)}`, onchange: (ev) => { if (ev.target.value) e.type = ev.target.value; else delete e.type; markDirty('answers'); keepFocus(tbody, draw); runTest(); } },
+          h('option', { value: '' }, 'Fill in the answer'), h('option', { value: 'skip' }, ANSWER_TYPE.skip), h('option', { value: 'check' }, ANSWER_TYPE.check))),
+        h('td', { class: 'col-actions col-sticky' }, h('div', { class: 'row-actions' }, up, down, del)));
     }));
   };
 
   view.replaceChildren(h('div', { class: 'view-inner' },
-    pageHead('Answers', 'Your own answers for questions your profile does not cover. This is an advanced page.', [
-      btn('Add an answer', { kind: 'primary', icon: 'plus', onclick: () => { rows.push({ q: '', pattern: '', answer: '' }); markDirty('answers'); draw(); tbody.querySelector('tr:last-child input')?.focus(); } }),
+    pageHead('Saved answers', 'Answers JobPilot fills in when a form asks a question your profile does not cover.', [
+      btn('Add an answer', { kind: 'primary', icon: 'plus', onclick: () => {
+        const e = { q: '', pattern: '', answer: '' };
+        A.fresh.add(e);
+        rows.push(e); markDirty('answers'); draw();
+        tbody.querySelector('tr:last-child input')?.focus();
+      } }),
     ]),
     callout('info',
-      h('p', null, 'Each pattern is a regular expression. JobPilot checks it against the question in lowercase with punctuation removed. The first row that matches wins, and these rows come before your profile answers.'),
-      h('p', null, 'For example ', code('^why do you want'), ' matches any question that starts with "Why do you want". Answers you give on the Questions tab are added here for you.')),
+      h('p', null, 'When you answer a question on the Questions tab, it is saved here and reused on every form that asks the same thing. You can change an answer here at any time.'),
+      h('p', { class: 'small' }, 'Each answer has a matching rule that decides which questions it answers. You only need it for answers you add yourself. The first row that matches wins, and these rows come before your profile answers.')),
     h('section', { class: 'card', style: { marginTop: '16px' } },
-      cardHead('Try a question', 'See which row would answer it.'),
+      cardHead('Try a question', 'See which saved answer JobPilot would use.'),
       h('div', { class: 'tester' }, h('div', { class: 'search-input' }, icon('search', 16), h('input', { class: 'input', value: A.test, placeholder: 'Paste a question from a form', 'aria-label': 'Question to test', oninput: (e) => { A.test = e.target.value; runTest(); } }))),
       result),
     h('section', { class: 'table-card', style: { marginTop: '16px' } }, h('div', { class: 'table-wrap' }, h('table', { class: 'table ans-table' },
-      h('thead', null, h('tr', null, h('th', null, '#'), h('th', null, 'Pattern'), h('th', null, 'Answer'), h('th', null, 'Type'), h('th', null, 'Note'), h('th', null, h('span', { class: 'sr-only' }, 'Actions')))),
+      h('thead', null, h('tr', null, h('th', null, '#'), h('th', null, 'Question'), h('th', null, 'Your answer'), h('th', null, 'How to answer'), h('th', { class: 'col-actions col-sticky' }, h('span', { class: 'sr-only' }, 'Actions')))),
       tbody))),
     savebar('answers', saveAnswers, () => { E.answers = clone(S.answers || []); rerender(); })));
   draw();
@@ -2401,7 +3113,7 @@ function renderAnswers() {
 
 async function saveAnswers() {
   const bad = E.answers.findIndex((e) => patternError(e.pattern));
-  if (bad >= 0) { toast(`Row ${bad + 1}: ${patternError(E.answers[bad].pattern)}`, 'error'); return; }
+  if (bad >= 0) { A.showRule.add(E.answers[bad]); rerender(); toast(`Row ${bad + 1}: ${patternError(E.answers[bad].pattern)}`, 'error'); return; }
   const res = await api('PUT', '/api/answers', E.answers).catch(() => null);
   if (!res) return;
   S.answers = res;
@@ -2461,7 +3173,7 @@ function renderSettings() {
           h('input', { class: 'input', readonly: 'readonly', value: ws, 'aria-label': 'Workspace folder' }),
           btn('Copy', { icon: 'copy', onclick: async () => {
             try { await navigator.clipboard.writeText(ws); toast('Copied the folder path.', 'success'); } catch { toast('Could not copy. Select the path and copy it yourself.', 'warn'); }
-          } })), { hint: 'Your resumes, profile, answers, jobs and applications sheet all live here. To use another folder, start JobPilot with JOBPILOT_HOME set to it.' }))),
+          } })), { hint: h('span', null, 'Your resumes, profile, answers, jobs and applications sheet all live here. To use another folder, start JobPilot with ', code('npm start -- --workspace <folder>'), '.') }))),
     savebar('settings', saveSettingsNow, () => { E.settings = clone(S.settings); rerender(); })));
 }
 

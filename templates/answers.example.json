@@ -1,7 +1,7 @@
 [
   {
-    "q": "Consent and acknowledgement boxes (privacy policy, I certify my answers are true)",
-    "pattern": "^i (have read|agree|acknowledge|consent|certify|understand|confirm|attest)|privacy (policy|notice)|terms (of|and) (use|service|conditions)",
+    "q": "Consent and acknowledgement boxes (privacy policy, I certify my answers are true). Boxes about sponsorship, work authorization, age or marketing messages go by your profile instead",
+    "pattern": "^(?!.*\\b(sponsor\\w*|visa|authori[sz]\\w*|citizen\\w*|eligib\\w*|18|age|sms|text messag\\w*|marketing|promotional|newsletter)\\b)(i (have read|agree|acknowledge|consent|certify|understand|confirm|attest)\\b|.*\\bprivacy (policy|notice)\\b|.*\\bterms (of|and) (use|service|conditions)\\b)",
     "answer": "Yes",
     "type": "check"
   },

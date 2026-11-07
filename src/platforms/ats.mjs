@@ -2,7 +2,7 @@
 // "small forms" most external links lead to. Other sites are left for you,
 // with the link saved in the dashboard.
 import { detectCaptcha, sleep } from '../core/safety.mjs';
-import { fillAll, fillRadios, fillSegmented, fillText, attachFiles, dedupeUnknowns } from '../core/forms.mjs';
+import { fillAll, fillRadios, fillSegmented, fillText, attachFiles, dedupeUnknowns, beforeSubmit, submitConfirmed, flaggedQuestions, NOT_CONFIRMED } from '../core/forms.mjs';
 
 export const source = 'ats';
 export const label = 'Company forms (Lever, Ashby, Greenhouse)';
@@ -75,7 +75,11 @@ export async function details(page, job) {
 
 const CONFIRM = /thank(s| you)|application (has been )?(submitted|received|sent)|we('| ha)ve received|successfully submitted/i;
 
-/** ctx: { bank, submit, aiAutoSubmit, draft, docs: {resume, coverLetter, transcript}, log } */
+/**
+ * ctx: { bank, submit, aiAutoSubmit, draft, docs: {resume, coverLetter, transcript}, log, confirmTimeout? }
+ * 'submitted' is returned only when the site confirmed it; a click with no
+ * confirmation comes back as 'needs_review' with the tab left open.
+ */
 export async function apply(page, job, ctx) {
   const ats = detectAts(job.url);
   if (!ats) return { status: 'external_manual', note: 'not a Lever, Ashby or Greenhouse form' };
@@ -88,23 +92,29 @@ export async function apply(page, job, ctx) {
     return { status: 'error', note: `${ats}: the posting looks closed`, keepTab: false };
   }
   const root = formRoot(page, ats);
-  await attachFiles(root, ctx.docs);
+  const attached = await attachFiles(root, ctx.docs);
+  // the file input holds exactly this file, so this is the resume that was sent
+  const resumeUsed = attached.includes('resume') ? String(ctx.docs.resume).split(/[\\/]/).pop() : null;
   // Ashby reads the resume and re-renders the form; wait so answers stick
   await sleep(ats === 'ashby' ? 5000 : 1500);
   const unknowns = [];
   const drafted = [];
   await fillAll(page, root, ctx.bank, unknowns, { draft: ctx.draft, drafted });
   const blocking = dedupeUnknowns(unknowns).filter((u) => u.required);
-  if (blocking.length) return { status: 'needs_answer', note: `${blocking.length} required question(s) need an answer; the tab is left open`, unknowns: blocking, drafted, keepTab: true };
-  if (!ctx.submit) return { status: 'filled_not_submitted', note: 'filled; review and submit in the open tab (submit is off)', drafted, keepTab: true };
-  if (drafted.length && !ctx.aiAutoSubmit) return { status: 'needs_review', note: `AI wrote ${drafted.length} answer(s); read them in the open tab and submit`, drafted, keepTab: true };
+  if (blocking.length) return { status: 'needs_answer', note: `${blocking.length} required question(s) need an answer; the tab is left open`, unknowns: blocking, drafted, resumeUsed, keepTab: true };
+  if (!ctx.submit) return { status: 'filled_not_submitted', note: 'filled; review and submit in the open tab (submit is off)', drafted, resumeUsed, keepTab: true };
+  if (drafted.length && !ctx.aiAutoSubmit) return { status: 'needs_review', note: `AI wrote ${drafted.length} answer(s); read them in the open tab and submit`, drafted, resumeUsed, keepTab: true };
 
   const submit = page.locator('button:has-text("Submit application"), button:has-text("Submit Application"), input[type="submit"][value*="Submit" i], button[type="submit"]').first();
   if (!await submit.isVisible({ timeout: 3000 }).catch(() => false)) return { status: 'error', note: 'no submit button found; the tab is left open', keepTab: true };
+  // "Thank you for your interest" is often already in the posting, so only
+  // text that appears after the click (or the form going away) counts
+  let before = await beforeSubmit(page, submit, CONFIRM);
   await submit.click({ timeout: 8000 });
   await sleep(3000);
   if (await detectCaptcha(page)) return { status: 'blocked', note: 'a captcha appeared after submit; finish it in the open tab', keepTab: true };
-  let ok = await page.getByText(CONFIRM).first().isVisible({ timeout: 15000 }).catch(() => false);
+  const wait = ctx.confirmTimeout ?? 12000;
+  let ok = await submitConfirmed(page, before, { re: CONFIRM, submit, timeout: wait });
   if (!ok) {
     // one repair round: some widgets lose state when the page re-renders
     const scratch = [];
@@ -112,14 +122,17 @@ export async function apply(page, job, ctx) {
     await fillSegmented(root, ctx.bank, scratch, { force: true });
     await fillText(page, root, ctx.bank, scratch);
     if (await submit.isVisible({ timeout: 2000 }).catch(() => false)) {
+      before = await beforeSubmit(page, submit, CONFIRM);
       await submit.click({ timeout: 8000 }).catch(() => {});
       await sleep(3000);
-      ok = await page.getByText(CONFIRM).first().isVisible({ timeout: 12000 }).catch(() => false);
+      ok = await submitConfirmed(page, before, { re: CONFIRM, submit, timeout: wait });
     }
   }
-  if (ok) return { status: 'submitted', note: '', drafted };
-  const errs = [...new Set((await page.locator('[class*="error" i], [role="alert"]').allInnerTexts().catch(() => [])).map((t) => t.trim()).filter((t) => t && t.length < 200))];
-  return errs.length
-    ? { status: 'needs_answer', note: 'the form flagged answers after submit; the tab is left open', unknowns: errs.map((q) => ({ question: q, options: [], required: true })), drafted, keepTab: true }
-    : { status: 'submitted', note: 'Submit was pressed but no confirmation showed; check the open tab', drafted, keepTab: true };
+  if (ok) return { status: 'submitted', note: '', drafted, resumeUsed };
+  // ask about the flagged fields by their labels, never by the error text
+  const flagged = await flaggedQuestions(page.locator('body'));
+  if (flagged.flagged) {
+    return { status: 'needs_answer', note: 'the form flagged answers after submit; the tab is left open', unknowns: flagged.questions.map((q) => ({ question: q, options: [], required: true })), drafted, resumeUsed, keepTab: true };
+  }
+  return { status: 'needs_review', note: NOT_CONFIRMED, drafted, resumeUsed, keepTab: true };
 }

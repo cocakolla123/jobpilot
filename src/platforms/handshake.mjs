@@ -3,7 +3,7 @@
 // (and transcript) you upload there should have the same file name as the one
 // in your JobPilot resumes folder. Setup > Check my accounts compares them.
 import { assertNoWall, sleep } from '../core/safety.mjs';
-import { fillAll, attachFiles, dedupeUnknowns } from '../core/forms.mjs';
+import { fillAll, attachFiles, dedupeUnknowns, beforeSubmit, submitConfirmed, hasFileName, fileNameRe, NOT_CONFIRMED, RESUME_UNCONFIRMED } from '../core/forms.mjs';
 
 export const source = 'handshake';
 export const label = 'Handshake';
@@ -62,6 +62,7 @@ export async function search(page, s, ctx) {
 }
 
 const APPLY_RE = /^(quick apply|apply)$/i;
+const CONFIRM = /application submitted|you('| ha)ve applied|successfully applied|applied on/i;
 const EXTERNAL_RE = /apply externally|apply on (company|employer) site/i;
 
 async function panelButtons(page) {
@@ -156,25 +157,32 @@ export async function readSlots(page) {
 }
 
 const baseName = (f) => String(f || '').split(/[\\/]/).pop().replace(/\.(pdf|docx?)$/i, '');
+const fileName = (f) => String(f || '').split(/[\\/]/).pop();
 
-/** Make a slot hold the wanted document: pick it from the library, else upload it. */
+/**
+ * Make a slot hold the wanted document: pick it from the library, else upload
+ * it. 'ok' only when the slot then shows exactly that file name
+ * ("Jane_Resume_ML.pdf" never counts as "Jane_Resume.pdf").
+ */
 async function ensureSlot(page, dialog, kind, filePath) {
   const want = baseName(filePath);
+  const re = fileNameRe(filePath);
   let slots = await readSlots(page);
   if (!(kind in slots)) return 'no-slot';
-  if (slots[kind].includes(want)) return 'ok';
+  if (hasFileName(slots[kind], filePath)) return 'ok';
   const sec = dialog.locator(`[data-jp-slot="${kind}"]`);
   const x = sec.locator('button[aria-label="Close"]').first();
   if (await x.isVisible({ timeout: 1000 }).catch(() => false)) { await x.click({ timeout: 3000 }).catch(() => {}); await sleep(1500); }
   const searchBox = dialog.locator('input[type=search]').first();
   if (await searchBox.isVisible({ timeout: 1500 }).catch(() => false)) { await searchBox.fill(want.slice(0, 40)).catch(() => {}); await sleep(1500); }
-  const hit = await page.evaluate((want) => {
+  const hit = re && await page.evaluate(({ src, flags }) => {
+    const re = new RegExp(src, flags);
     const dlg = document.querySelector('[data-jp-modal]');
-    const opts = [...dlg.querySelectorAll('[role=option], li, label')].filter((o) => o.offsetParent !== null && (o.innerText || '').split('\n')[0].includes(want));
+    const opts = [...dlg.querySelectorAll('[role=option], li, label')].filter((o) => o.offsetParent !== null && re.test((o.innerText || '').split('\n')[0]));
     const opt = opts.find((o) => !/\(\d+\)/.test(o.innerText.split('\n')[0])) || opts[0];
     if (opt) { (opt.querySelector('button,a,input') || opt).click(); return true; }
     return false;
-  }, want).catch(() => false);
+  }, { src: re.source, flags: re.flags }).catch(() => false);
   if (!hit && filePath) {
     const fi = sec.locator('input[type=file]').first();
     const any = await fi.count() ? fi : dialog.locator('input[type=file]').first();
@@ -188,7 +196,7 @@ async function ensureSlot(page, dialog, kind, filePath) {
   }
   await sleep(1500);
   slots = await readSlots(page);
-  return slots[kind]?.includes(want) ? 'ok' : 'unverified';
+  return hasFileName(slots[kind], filePath) ? 'ok' : 'unverified';
 }
 
 /**
@@ -215,15 +223,17 @@ export async function apply(page, job, ctx) {
   if (!await tagModal(page)) return { status: 'error', note: 'the Quick apply window did not open', keepTab: true };
   const dialog = page.locator('[data-jp-modal]');
   const drafted = [];
-  const keep = (status, note, extra = {}) => ({ status, note, drafted, keepTab: true, ...extra });
+  let resumeUsed = null;
+  const keep = (status, note, extra = {}) => ({ status, note, drafted, resumeUsed, keepTab: true, ...extra });
   try {
     const resumeState = await ensureSlot(page, dialog, 'resume', ctx.docs.resume);
     const transcriptState = ctx.docs.transcript ? await ensureSlot(page, dialog, 'transcript', ctx.docs.transcript) : 'no-file';
     if (ctx.docs.coverLetter) await ensureSlot(page, dialog, 'coverLetter', ctx.docs.coverLetter);
     const slots = await readSlots(page);
     if (resumeState !== 'ok' && resumeState !== 'no-slot') {
-      return keep('needs_answer', `could not attach ${baseName(ctx.docs.resume)}; pick it in the open tab (or upload it to your Handshake documents)`);
+      return keep('needs_review', `${RESUME_UNCONFIRMED} (it should be ${fileName(ctx.docs.resume)}; you can also upload it to your Handshake documents)`);
     }
+    resumeUsed = resumeState === 'ok' ? fileName(ctx.docs.resume) : null;
     if ('transcript' in slots && !['ok', 'no-slot'].includes(transcriptState)) {
       return keep('needs_answer', 'this job wants a transcript: add one in Setup > Documents, or attach it in the open tab');
     }
@@ -233,12 +243,15 @@ export async function apply(page, job, ctx) {
     if (blocking.length) return keep('needs_answer', `${blocking.length} question(s) need an answer; the Quick apply window is open in its tab`, { unknowns: blocking });
     if (!ctx.submit) return keep('filled_not_submitted', 'filled; review and submit in the open tab (submit is off)');
     if (drafted.length && !ctx.aiAutoSubmit) return keep('needs_review', `AI wrote ${drafted.length} answer(s); read them in the open tab and submit`);
-    await dialog.locator('button').filter({ hasText: /submit application/i }).first().click({ timeout: 8000 });
+    const submit = dialog.locator('button').filter({ hasText: /submit application/i }).first();
+    // "applied on" can already be in the posting text: only new text, or the window closing, counts
+    const before = await beforeSubmit(page, submit, CONFIRM);
+    await submit.click({ timeout: 8000 });
     await sleep(4000);
-    const ok = await page.getByText(/application submitted|you('| ha)ve applied|successfully applied|applied on/i).first().isVisible({ timeout: 8000 }).catch(() => false);
-    if (!ok) return keep('submitted', 'Submit was pressed but Handshake showed no confirmation; check the open tab');
+    const ok = await submitConfirmed(page, before, { re: CONFIRM, submit, timeout: ctx.confirmTimeout ?? 8000 });
+    if (!ok) return keep('needs_review', NOT_CONFIRMED);
     await page.keyboard.press('Escape').catch(() => {});
-    return { status: 'submitted', note: '', drafted };
+    return { status: 'submitted', note: '', drafted, resumeUsed };
   } catch (e) {
     return keep('error', String(e.message || e).split('\n')[0].slice(0, 120));
   }

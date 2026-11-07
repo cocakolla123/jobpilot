@@ -8,9 +8,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
-import { loadSettings, readJson } from './core/config.mjs';
-import { launchChrome, attach } from './core/chrome.mjs';
-import { readSheet, appendRow, ensureSheet, dedupIndex, submittedToday } from './core/sheet.mjs';
+const cap = (s) => String(s).charAt(0).toUpperCase() + String(s).slice(1);
+import { loadSettings, readJson, writeJson } from './core/config.mjs';
+import { launchChrome, attach, browserGone, friendlyError, ChromeProblem, CHROME_HELP } from './core/chrome.mjs';
+import { readSheet, appendRowSafe, ensureSheet, dedupIndex, submittedToday } from './core/sheet.mjs';
 import { loadJobs, upsertJob, updateJob, jobKey } from './core/jobs.mjs';
 import { listResumes } from './core/resumes.mjs';
 import { buildMatcher } from './core/matcher.mjs';
@@ -28,18 +29,66 @@ import * as ats from './platforms/ats.mjs';
 export const PLATFORMS = { linkedin, handshake, indeed };
 export const SOURCES = Object.keys(PLATFORMS);
 
+// what each status means, in the words the dashboard uses
+export const STATUS_TEXT = {
+  submitted: 'sent', filled_not_submitted: 'filled in, waiting for you to send', needs_review: 'filled in, check it before sending',
+  needs_answer: 'needs an answer from you', external_manual: 'apply on the company site', blocked: 'stopped by a sign in or security check',
+  error: 'problem', duplicate: 'already applied', saved: 'not applied yet', skipped: 'skipped', applying: 'applying',
+};
+export const STUCK_NOTE = 'JobPilot stopped while applying to this one. Check the site to see if it was sent, then press I sent it or Retry.';
+
+/** Jobs left in "applying" by a crash or Ctrl+C. They may or may not have gone out, so they wait for you. */
+export function releaseStuckJobs(ws) {
+  let n = 0;
+  for (const j of loadJobs(ws)) if (j.status === 'applying') { updateJob(ws, jobKey(j), { status: 'error', note: STUCK_NOTE, tabOpen: false }); n++; }
+  return n;
+}
+
+const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+
 export class Runner extends EventEmitter {
   constructor(ws) {
     super();
     this.ws = ws;
-    this.state = { task: null, startedAt: null, done: 0, total: 0, current: '', stop: false, last: null };
+    this.state = { task: null, startedAt: null, done: 0, total: 0, current: '', stop: false, last: null, waitingTabs: 0 };
     this.session = null;
-    // tabs left open for you, kept across runs; closing one frees its slot
-    this.waiting = [];
+    // job key -> its tab left open for you, kept across runs; closing one frees its slot
+    this.waiting = new Map();
   }
 
-  log(msg, level = 'info') {
-    const entry = { ts: new Date().toISOString(), level, msg };
+  /** Tabs still open for you. Ones you closed (or lost to a Chrome restart) drop out. */
+  waitingTabs() {
+    for (const [key, page] of this.waiting) if (page.isClosed()) this.waiting.delete(key);
+    return this.waiting;
+  }
+
+  /** Closes a job's waiting tab, when you skip it, retry it or mark it done in the dashboard. */
+  async closeTabFor(key) {
+    const page = this.waiting.get(key);
+    this.waiting.delete(key);
+    if (page && !page.isClosed()) await page.close().catch(() => {});
+  }
+
+  /** Brings a job's waiting tab to the front of JobPilot's Chrome. */
+  async showTab(key) {
+    const page = this.waitingTabs().get(key);
+    if (!page) return false;
+    await page.bringToFront().catch(() => {});
+    return true;
+  }
+
+  /**
+   * Adds a row to applications.csv. When the file is locked (open in Excel on
+   * Windows, say) the row is kept and added next time instead of stopping the run.
+   */
+  recordRow(row) {
+    const res = appendRowSafe(this.ws.sheet, path.join(this.ws.dir, '.cache', 'pending-rows.json'), row);
+    if (!res.ok) this.log(`Could not write to applications.csv${/EBUSY|EPERM|EACCES/.test(res.code || '') ? ' (it may be open in another app, like Excel)' : ''}. The row is kept and will be added next time.`, 'warn');
+    return res.ok;
+  }
+
+  log(msg, level = 'info', extra = {}) {
+    const entry = { ts: new Date().toISOString(), level, msg, ...extra };
     this.emit('log', entry);
     try {
       fs.mkdirSync(this.ws.logs, { recursive: true });
@@ -52,27 +101,68 @@ export class Runner extends EventEmitter {
 
   async connect() {
     const settings = loadSettings(this.ws);
-    if (this.session) { try { await this.session.context.pages(); return this.session; } catch { this.session = null; } }
-    const port = await launchChrome(this.ws, settings.cdpPort);
-    if (!port) throw new Error("JobPilot's Chrome did not start. If its window is already open, quit it and try again.");
-    this.session = await attach(port);
-    this.session.browser.on('disconnected', () => { this.session = null; });
-    return this.session;
+    if (this.session?.browser.isConnected()) return this.session;
+    this.session = null;
+    // a Chrome that is still shutting down can answer for a moment and then
+    // drop the connection, so wait it out and launch again
+    for (let attempt = 1; ; attempt++) {
+      const port = await launchChrome(this.ws, settings.cdpPort, [], { log: (m) => this.log(m), headless: process.env.JOBPILOT_HEADLESS === '1' });
+      try {
+        this.session = await attach(port);
+        break;
+      } catch (e) {
+        if (attempt >= 3 || !(browserGone(e) || /connectOverCDP|ECONNREFUSED/i.test(String(e.message)))) throw new ChromeProblem(friendlyError(e));
+        await sleep(1500);
+      }
+    }
+    const session = this.session;
+    session.browser.on('disconnected', () => { if (this.session === session) this.session = null; });
+    return session;
+  }
+
+  /**
+   * Runs one step in JobPilot's Chrome. If Chrome closed underneath it (someone
+   * quit it, or it crashed), reopens Chrome and runs the step once more; if it
+   * closes again the run stops with an instruction instead of failing every job.
+   */
+  async withChrome(step) {
+    try {
+      return await step(await this.connect());
+    } catch (e) {
+      if (!browserGone(e)) throw e;
+      this.session = null;
+      this.log("JobPilot's Chrome closed while it was working, so it was reopened.", 'warn');
+      try {
+        return await step(await this.connect());
+      } catch (e2) {
+        if (browserGone(e2)) throw new ChromeProblem(CHROME_HELP.keepsClosing);
+        throw e2;
+      }
+    }
   }
 
   async run(task, fn) {
     if (this.state.task) throw new Error(`Busy: ${this.state.task} is running.`);
+    // one run per workspace, even across the dashboard and the command line
+    const lock = path.join(this.ws.dir, '.jobpilot.lock');
+    const held = readJson(lock, null);
+    if (held?.pid && held.pid !== process.pid && pidAlive(held.pid)) {
+      throw new Error(`JobPilot is already running ${held.task || 'a task'} in another window (the dashboard or the command line). Wait for it to finish, then try again.`);
+    }
+    try { writeJson(lock, { pid: process.pid, task, at: new Date().toISOString() }); } catch { /* lock is best effort */ }
     this.setState({ task, startedAt: new Date().toISOString(), done: 0, total: 0, current: '', stop: false });
     try {
       const out = await fn();
       this.setState({ last: { task, ok: true, at: new Date().toISOString(), summary: out?.summary || '' } });
       return out;
     } catch (e) {
-      this.log(`${task} stopped: ${e.message}`, 'error');
-      this.setState({ last: { task, ok: false, at: new Date().toISOString(), summary: e.message } });
-      throw e;
+      const why = friendlyError(e);
+      this.log(`${cap(task)} stopped: ${why}`, 'error');
+      this.setState({ last: { task, ok: false, at: new Date().toISOString(), summary: why } });
+      throw new Error(why);
     } finally {
-      this.setState({ task: null, current: '', stop: false });
+      if (readJson(lock, null)?.pid === process.pid) fs.rmSync(lock, { force: true });
+      this.setState({ task: null, current: '', stop: false, waitingTabs: this.waitingTabs().size });
     }
   }
 
@@ -80,10 +170,11 @@ export class Runner extends EventEmitter {
   async openLogin(src) {
     const p = PLATFORMS[src];
     if (!p) throw new Error(`unknown site ${src}`);
-    const s = await this.connect();
-    const page = await s.newTab();
-    await page.goto(p.home, { waitUntil: 'domcontentloaded' }).catch(() => {});
-    await page.bringToFront().catch(() => {});
+    await this.withChrome(async (s) => {
+      const page = await s.newTab();
+      await page.goto(p.home, { waitUntil: 'domcontentloaded' }).catch(() => {});
+      await page.bringToFront().catch(() => {});
+    });
     return true;
   }
 
@@ -102,17 +193,22 @@ export class Runner extends EventEmitter {
       ensureSheet(ws.sheet);
       const done = dedupIndex(readSheet(ws.sheet));
       const known = new Set(loadJobs(ws).map(jobKey));
-      const s = await this.connect();
+      await this.connect();
       const stopped = new Set();
       let saved = 0, skipped = 0;
       for (const search of list) {
-        for (const src of (search.sources || SOURCES).filter((x) => sources.includes(x) && PLATFORMS[x])) {
+        for (const src of (search.sources || SOURCES).filter((x) => sources.includes(x) && settings.sites.includes(x) && PLATFORMS[x])) {
           if (this.state.stop || stopped.has(src)) continue;
           const P = PLATFORMS[src];
-          const page = await s.workTab(src);
+          let page = null;
           this.log(`${P.label}: searching "${search.name || search.keywords}"`);
           let refs = [];
-          try { refs = await P.search(page, search, { limit: search.limit || settings.perSearchLimit, log: (m) => this.log(m) }); }
+          try {
+            refs = await this.withChrome(async (s) => {
+              page = await s.workTab(src);
+              return P.search(page, search, { limit: search.limit || settings.perSearchLimit, log: (m) => this.log(m) });
+            });
+          }
           catch (e) { this.handleSiteError(e, src, stopped); continue; }
           this.setState({ total: this.state.total + refs.length });
           for (const ref of refs) {
@@ -124,7 +220,10 @@ export class Runner extends EventEmitter {
             const why = skipReason(ref, settings);
             if (why) { upsertJob(ws, { ...ref, status: 'skipped', note: why }); known.add(key); skipped++; continue; }
             try {
-              const d = await P.details(page, ref, { log: (m) => this.log(m) });
+              const d = await this.withChrome(async (s) => {
+                page = await s.workTab(src);
+                return P.details(page, ref, { log: (m) => this.log(m) });
+              });
               if (d.gone) { skipped++; continue; }
               const job = { ...ref, ...Object.fromEntries(Object.entries(d).filter(([, v]) => v)) };
               const why2 = skipReason(job, settings);
@@ -143,14 +242,14 @@ export class Runner extends EventEmitter {
                 skills: { pct: cov.pct, have: cov.have, missing: cov.missing }, savedOnSite, search: search.name || '',
               });
               known.add(key); saved++;
-              this.log(`Saved: ${job.title} at ${job.company} -> ${m.resume?.file || 'no resume'}${savedOnSite === 'saved' ? ' (saved on the site too)' : ''}`);
+              this.log(`Saved: ${job.title} at ${job.company}, using ${m.resume?.file || 'no resume'}${savedOnSite === 'saved' ? ' (saved on the site too)' : ''}`, 'info', { job: key });
             } catch (e) { if (this.handleSiteError(e, src, stopped)) break; }
             await pause(settings, 0.4);
           }
         }
       }
       // a site that stopped on a login or security page keeps its tab open for you
-      await s.closeWorkTabs([...stopped]);
+      await this.session?.closeWorkTabs([...stopped]);
       const summary = `${saved} new job(s) saved, ${skipped} skipped`;
       this.log(`Search finished: ${summary}.`);
       return { summary, saved, skipped };
@@ -158,13 +257,14 @@ export class Runner extends EventEmitter {
   }
 
   handleSiteError(e, src, stopped) {
+    if (e instanceof ChromeProblem) throw e;
     if (e instanceof SecurityStop) {
       stopped.add(src);
       this.log(e.message, 'error');
       this.log(`Skipping ${PLATFORMS[src]?.label || src} for the rest of this run.`, 'warn');
       return true;
     }
-    this.log(`${PLATFORMS[src]?.label || src}: ${String(e.message || e).split('\n')[0]}`, 'warn');
+    this.log(`${PLATFORMS[src]?.label || src}: ${friendlyError(e)}`, 'warn');
     return false;
   }
 
@@ -180,10 +280,13 @@ export class Runner extends EventEmitter {
       const match = buildMatcher(resumes);
       const docPath = (f) => (f && fs.existsSync(path.join(ws.documents, f)) ? path.join(ws.documents, f) : null);
       const extraDocs = { transcript: docPath(profile.documents?.transcript), coverLetter: docPath(profile.documents?.coverLetter) };
+      const stuck = releaseStuckJobs(ws);
+      if (stuck) this.log(`${stuck} job(s) were left mid application last time. They are marked Problem so you can check them.`, 'warn');
       ensureSheet(ws.sheet);
       let rows = readSheet(ws.sheet);
       const done = dedupIndex(rows);
       const queue = loadJobs(ws).filter((j) => (keys ? keys.includes(jobKey(j)) : j.status === 'saved')
+        && (j.applyType === 'external' || settings.sites.includes(j.source))
         && (sources.includes(j.source) || (j.applyType === 'external' && sources.includes('ats'))))
         .sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, limit);
       if (!queue.length) throw new Error('No saved jobs to apply to. Run a search first.');
@@ -198,7 +301,7 @@ export class Runner extends EventEmitter {
         this.log(`AI answers are on (${ai.provider === 'api' ? 'API key' : 'your Claude Code sign-in'}, ${ai.model}); ${ai.autoSubmit ? 'forms with AI answers are submitted' : 'forms with AI answers are left open for you to review'}.`);
       }
       const aiState = {};
-      const s = await this.connect();
+      await this.connect();
       // upload new or edited resumes first, so the dated copies are the ones picked
       if (settings.autoSyncResumes !== false) {
         const sites = ['linkedin', 'handshake'].filter((src) => queue.some((j) => j.source === src && j.applyType !== 'external' && j.applyType !== 'ats'));
@@ -206,31 +309,40 @@ export class Runner extends EventEmitter {
           const stale = resumes.filter((r) => resumeState(loadSync(ws), src, r).state !== 'current');
           if (!stale.length) continue;
           this.log(`${PLATFORMS[src].label}: uploading ${stale.length} new or edited resume(s) first, with today's date in the name.`);
-          const page = await s.workTab(src);
           try {
-            if ((await PLATFORMS[src].loginState(page)).loggedIn) await this.uploadToSite(page, src, stale, { uploaded: [], skipped: [], failed: [] }, { settings, profile });
-            else this.log(`${PLATFORMS[src].label}: not signed in, so resumes were not uploaded.`, 'warn');
-          } catch (e) { this.log(`${PLATFORMS[src].label}: ${String(e.message || e).split('\n')[0]}`, 'warn'); }
+            await this.withChrome(async (s) => {
+              const page = await s.workTab(src);
+              if ((await PLATFORMS[src].loginState(page)).loggedIn) await this.uploadToSite(page, src, stale, { uploaded: [], skipped: [], failed: [] }, { settings, profile });
+              else this.log(`${PLATFORMS[src].label}: not signed in, so resumes were not uploaded.`, 'warn');
+            });
+          } catch (e) {
+            if (e instanceof ChromeProblem) throw e;
+            this.log(`${PLATFORMS[src].label}: ${friendlyError(e)}`, 'warn');
+          }
         }
-        await s.closeWorkTabs();
+        await this.session?.closeWorkTabs();
       }
       const sync = loadSync(ws);
       const warnedSync = new Set();
       const stopped = new Set();
       const counts = {};
-      this.waiting = this.waiting.filter((t) => !t.isClosed());
-      const waiting = this.waiting;
-      for (const job of queue) {
+      let chromeDrops = 0;
+      for (const queued of queue) {
         if (this.state.stop) break;
-        for (let i = waiting.length - 1; i >= 0; i--) if (waiting[i].isClosed()) waiting.splice(i, 1);
-        if (waiting.length >= settings.maxOpenTabs) {
-          this.log(`${waiting.length} tabs are waiting for you in JobPilot's Chrome. Finish or close them, then run Apply again.`, 'warn');
+        const open = this.waitingTabs().size;
+        if (open >= settings.maxOpenTabs) {
+          this.log(`${open} tabs are waiting for you in JobPilot's Chrome. Finish or close them, then run Apply again.`, 'warn');
           break;
         }
-        const key = jobKey(job);
+        const key = jobKey(queued);
+        // reread it: you may have skipped, removed or finished it while the run was going
+        const job = loadJobs(ws).find((j) => jobKey(j) === key);
+        if (!job || ['skipped', 'submitted', 'duplicate', 'applying'].includes(job.status)) continue;
+        if (!keys && job.status !== 'saved') continue;
         this.setState({ current: `${job.title} at ${job.company}`, done: this.state.done + 1 });
         if (stopped.has(job.source)) continue;
-        if (done.isDone(job)) { updateJob(ws, key, { status: 'duplicate', note: 'already in your sheet' }); continue; }
+        // Retry asks for another try at a job that was only filled in before; one that was really sent never repeats
+        if (done.isDone(job) && !(job.retry && !done.isSent(job))) { updateJob(ws, key, { status: 'duplicate', note: 'already in your sheet', retry: false }); continue; }
         const external = job.applyType === 'external' || job.applyType === 'ats';
         if (!external && submittedToday(rows, job.source) >= (settings.dailyCaps[job.source] ?? 25)) {
           this.log(`${PLATFORMS[job.source].label}: daily cap of ${settings.dailyCaps[job.source]} reached; skipping the rest for today.`, 'warn');
@@ -257,10 +369,13 @@ export class Runner extends EventEmitter {
         let flow = job.source;
         let res;
         let tab = null;
+        const before = job.status || 'saved';
         updateJob(ws, key, { status: 'applying' });
         try {
           const P = PLATFORMS[job.source];
-          tab = await s.newTab();
+          // only opening the tab is retried if Chrome closed: once a form is being
+          // filled, a retry could send the same application twice
+          tab = await this.withChrome((s) => s.newTab());
           if (external) {
             flow = 'ats';
             let url = job.externalUrl;
@@ -288,27 +403,42 @@ export class Runner extends EventEmitter {
             }
             res = await P.apply(tab, job, ctx);
           }
+          chromeDrops = 0;
         } catch (e) {
-          if (e instanceof SecurityStop) {
+          if (e instanceof ChromeProblem) {
+            // the run is ending: this job never got a real try, so it goes back to the list
+            updateJob(ws, key, { status: before });
+            throw e;
+          }
+          if (browserGone(e)) {
+            this.session = null;
+            tab = null;
+            if (++chromeDrops >= 2) {
+              updateJob(ws, key, { status: 'error', note: "JobPilot's Chrome closed while applying to this one. Check the site to see if it was sent." });
+              throw new ChromeProblem(CHROME_HELP.keepsClosing);
+            }
+            res = { status: 'error', note: "JobPilot's Chrome closed while applying to this one. Check the site to see if it was sent, then press I sent it or Retry." };
+          } else if (e instanceof SecurityStop) {
             stopped.add(job.source);
             this.log(e.message, 'error');
             res = { status: 'blocked', note: e.message };
           } else {
-            res = { status: 'error', note: String(e.message || e).split('\n')[0].slice(0, 160) };
+            res = { status: 'error', note: friendlyError(e).slice(0, 200) };
           }
         }
         const status = res.status === 'already_applied' ? 'duplicate' : res.status;
         // the tab closes once the site confirmed; anything unsure stays open for you
         const keep = res.keepTab !== undefined ? res.keepTab : ['blocked', 'error'].includes(status);
         if (tab) {
-          if (keep && res.formPage && res.formPage !== tab) { await tab.close().catch(() => {}); waiting.push(res.formPage); }
-          else if (keep) waiting.push(tab);
+          if (keep && res.formPage && res.formPage !== tab) { await tab.close().catch(() => {}); this.waiting.set(key, res.formPage); }
+          else if (keep) this.waiting.set(key, tab);
           else await tab.close().catch(() => {});
+          this.setState({ waitingTabs: this.waitingTabs().size });
         }
         const drafted = res.drafted || [];
         const aiNote = drafted.length ? ` AI answered: ${drafted.map((d) => d.question.slice(0, 60)).join('; ')}` : '';
         updateJob(ws, key, {
-          status, note: res.note || '', appliedWith: resume.file, appliedAt: new Date().toISOString(), tabOpen: !!(tab && keep),
+          status, note: res.note || '', appliedWith: res.resumeUsed || resume.file, appliedAt: new Date().toISOString(), tabOpen: !!(tab && keep), retry: false,
           ...(drafted.length ? { drafts: drafted } : {}),
         });
         if (res.unknowns?.length) {
@@ -316,21 +446,21 @@ export class Runner extends EventEmitter {
           this.log(`${job.title}: ${res.unknowns.length} question(s) to answer on the Questions tab${n ? ` (${n} new)` : ''}`, 'warn');
         }
         if (status !== 'saved') {
-          appendRow(ws.sheet, {
+          this.recordRow({
             timestamp: new Date().toISOString(), source: flow === 'ats' ? 'ats' : job.source, job_id: job.jobId || '',
             title: job.title, company: job.company, location: job.location || '', job_url: job.url,
-            apply_url: job.externalUrl || '', resume: resume.file, match_score: job.score ?? '', status, notes: `${res.note || ''}${aiNote}`.trim(),
+            apply_url: job.externalUrl || '', resume: res.resumeUsed || resume.file, match_score: job.score ?? '', status, notes: `${res.note || ''}${aiNote}`.trim(),
           });
           rows = readSheet(ws.sheet);
           if (['submitted', 'filled_not_submitted', 'needs_review'].includes(status)) done.markDone(job);
         }
         counts[status] = (counts[status] || 0) + 1;
-        this.log(`${status.replace(/_/g, ' ')}: ${job.title} at ${job.company}${res.note ? ` (${res.note})` : ''}${tab && keep ? ' [tab left open]' : ''}`, status === 'error' || status === 'blocked' ? 'warn' : 'info');
+        this.log(`${job.title} at ${job.company}: ${STATUS_TEXT[status] || status.replace(/_/g, ' ')}${res.note ? ` (${res.note})` : ''}${tab && keep ? '. Its tab is open in JobPilot\'s Chrome.' : ''}`, status === 'error' || status === 'blocked' ? 'warn' : 'info', { job: key });
         await pause(settings);
       }
-      const left = waiting.filter((t) => !t.isClosed()).length;
+      const left = this.waitingTabs().size;
       if (left) this.log(`${left} tab(s) are open in JobPilot's Chrome for you to finish.`);
-      const summary = Object.entries(counts).map(([k, v]) => `${v} ${k.replace(/_/g, ' ')}`).join(', ') || 'nothing to do';
+      const summary = Object.entries(counts).map(([k, v]) => `${v} ${STATUS_TEXT[k] || k.replace(/_/g, ' ')}`).join(', ') || 'nothing to do';
       this.log(`Apply finished: ${summary}.`);
       return { summary, counts };
     });
@@ -378,21 +508,23 @@ export class Runner extends EventEmitter {
     return this.run('check', async () => {
       const resumes = await listResumes(this.ws);
       const sync = loadSync(this.ws);
-      const s = await this.connect();
+      await this.connect();
       const report = [];
-      for (const src of sources) {
-        const page = await s.workTab(src);
+      for (const src of sources.filter((x) => loadSettings(this.ws).sites.includes(x))) {
         this.setState({ current: PLATFORMS[src].label });
         let row;
-        try { row = await this.siteReport(page, src, resumes, sync); }
-        catch (e) { row = { source: src, label: PLATFORMS[src].label, loggedIn: false, note: String(e.message || e).split('\n')[0], resumes: [], missing: [] }; }
+        try { row = await this.withChrome(async (s) => this.siteReport(await s.workTab(src), src, resumes, sync)); }
+        catch (e) {
+          if (e instanceof ChromeProblem) throw e;
+          row = { source: src, label: PLATFORMS[src].label, loggedIn: false, checkFailed: true, note: `Could not check: ${friendlyError(e)} Press Check accounts again.`, resumes: [], missing: [] };
+        }
         report.push(row);
         const tail = src === 'indeed'
           ? `, Indeed has ${row.siteFiles?.[0] || 'no file'} (JobPilot switches it to the matched resume before each Indeed application)`
           : row.missing.length ? `, ${row.missing.length} of ${resumes.length} resume(s) need uploading: ${row.missing.join(', ')}` : ', all resumes are current';
         this.log(`${row.label}: ${row.loggedIn ? `signed in${tail}` : `not signed in${row.note ? ` (${row.note})` : ''}`}${row.transcript ? `. Newest transcript: ${row.transcript.onSite} (${row.transcript.date})` : ''}`);
       }
-      await s.closeWorkTabs(report.filter((r) => !r.loggedIn).map((r) => r.source));
+      await this.session?.closeWorkTabs(report.filter((r) => !r.loggedIn).map((r) => r.source));
       return { summary: report.map((r) => `${r.label}: ${r.loggedIn ? (r.missing?.length ? `${r.missing.length} to upload` : 'ok') : 'sign in'}`).join(', '), report };
     });
   }
@@ -412,32 +544,36 @@ export class Runner extends EventEmitter {
       if (!resumes.length) throw new Error('Add your resumes to the resumes folder first.');
       const profile = readJson(ws.profile, {});
       const rules = readJson(ws.resumeRules, {});
-      const s = await this.connect();
+      await this.connect();
       const report = [];
       this.setState({ total: resumes.length * sources.length });
-      for (const src of sources) {
+      for (const src of sources.filter((x) => settings.sites.includes(x))) {
         if (this.state.stop) break;
         const P = PLATFORMS[src];
-        const page = await s.workTab(src);
         const row = { source: src, label: P.label, uploaded: [], skipped: [], failed: [], note: '' };
         report.push(row);
         try {
-          const st = await P.loginState(page);
-          if (!st.loggedIn) { row.note = 'not signed in'; this.log(`${P.label}: not signed in, so nothing was uploaded.`, 'warn'); continue; }
-          if (src === 'indeed') {
-            const def = resumes.find((r) => r.file === rules.default) || resumes.find((r) => /swe|software|general|main/i.test(r.file)) || resumes[0];
-            const res = await this.switchIndeed(page, def);
-            (res.ok ? row.uploaded : row.failed).push({ file: def.file, name: res.name, note: res.note });
-            continue;
-          }
-          await this.uploadToSite(page, src, resumes, row, { settings, profile, progress: true });
+          await this.withChrome(async (s) => {
+            Object.assign(row, { uploaded: [], skipped: [], failed: [], note: '' });   // fresh if this is a retry
+            const page = await s.workTab(src);
+            const st = await P.loginState(page);
+            if (!st.loggedIn) { row.note = 'not signed in'; this.log(`${P.label}: not signed in, so nothing was uploaded.`, 'warn'); return; }
+            if (src === 'indeed') {
+              const def = resumes.find((r) => r.file === rules.default) || resumes.find((r) => /swe|software|general|main/i.test(r.file)) || resumes[0];
+              const res = await this.switchIndeed(page, def);
+              (res.ok ? row.uploaded : row.failed).push({ file: def.file, name: res.name, note: res.note });
+              return;
+            }
+            await this.uploadToSite(page, src, resumes, row, { settings, profile, progress: true });
+          });
         } catch (e) {
-          row.note = String(e.message || e).split('\n')[0];
+          if (e instanceof ChromeProblem) throw e;
+          row.note = e instanceof SecurityStop ? e.message : friendlyError(e);
           this.log(`${P.label}: ${row.note}`, e instanceof SecurityStop ? 'error' : 'warn');
         }
         this.log(`${P.label}: ${row.uploaded.length} uploaded, ${row.skipped.length} already current, ${row.failed.length} failed.`);
       }
-      await s.closeWorkTabs(report.filter((r) => r.note && !r.uploaded.length).map((r) => r.source));
+      await this.session?.closeWorkTabs(report.filter((r) => r.note && !r.uploaded.length).map((r) => r.source));
       const summary = report.map((r) => `${r.label}: ${r.uploaded.length} uploaded${r.failed.length ? `, ${r.failed.length} failed` : ''}`).join('; ');
       return { summary, report };
     });
