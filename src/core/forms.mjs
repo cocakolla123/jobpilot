@@ -30,41 +30,103 @@ export async function fillLongText(loc, text) {
   await loc.dispatchEvent('change').catch(() => {});
 }
 
-/** Typeahead / react-select: type, then pick the matching suggestion. */
+/** True for a dropdown drawn with a text box (react-select on Greenhouse, select2). */
+async function isListBox(input) {
+  return input.evaluate((el) => el.getAttribute('role') === 'combobox' || el.getAttribute('aria-autocomplete') === 'list'
+    || !!el.closest('[class*="select__control" i], .select2-container')).catch(() => false);
+}
+
+/**
+ * The suggestions belonging to this box: the list it says it controls, the
+ * react-select menu named after it, Lever's location results next to it, or
+ * else whatever option list is showing.
+ */
+async function optionsFor(page, input) {
+  const ids = await input.evaluate((el) => [el.getAttribute('aria-controls'), el.getAttribute('aria-owns'), el.id && `react-select-${el.id}-listbox`]
+    .filter(Boolean)).catch(() => []);
+  for (const id of ids) {
+    const opts = page.locator(`[id="${id.replace(/["\\]/g, '\\$&')}"] [role="option"]`);
+    if (await opts.count().catch(() => 0)) return opts;
+  }
+  const near = input.locator('xpath=ancestor::*[.//*[contains(concat(" ", normalize-space(@class), " "), " dropdown-results ")]][1]')
+    .locator('.dropdown-results > *:visible');
+  if (await near.count().catch(() => 0)) return near;
+  return page.locator('[role="option"]:visible, .pac-item:visible');
+}
+
+async function optionTexts(opts) {
+  return (await opts.allInnerTexts().catch(() => [])).map((t) => t.replace(/\s+/g, ' ').trim());
+}
+
+/**
+ * Dropdowns drawn as a text box (Greenhouse's react-select, Lever's location,
+ * typeaheads). A fixed list (Yes/No, country, gender) is opened and the
+ * matching choice clicked; a list that only fills in as you type (city,
+ * school) is searched first. Returns false, with the box left empty, when no
+ * choice matches, so the question goes to you instead of a guess.
+ */
 export async function fillCombobox(page, input, entry) {
   await input.scrollIntoViewIfNeeded().catch(() => {});
-  await input.click({ timeout: 4000 });
-  await input.fill('').catch(() => {});
-  const query = String(entry.typeaheadAnswer || entry.answer);
-  await input.pressSequentially(query, { delay: 30 });
-  await sleep(1200);
-  const options = page.locator('[role="listbox"] [role="option"], [role="option"]');
-  let n = await options.count().catch(() => 0);
-  if (!n && query.includes(',')) {
-    await input.fill('').catch(() => {});
-    await input.pressSequentially(query.split(',')[0].trim(), { delay: 30 });
-    await sleep(1200);
-    n = await options.count().catch(() => 0);
+  const opened = await input.click({ timeout: 4000 }).then(() => true).catch(() => false);
+  if (!opened) {
+    // react-select opens from its outer box too
+    await input.locator('xpath=ancestor::*[contains(@class,"control")][1]').click({ timeout: 3000 }).catch(() => input.focus().catch(() => {}));
   }
-  if (!n) {
-    // No suggestions, so this is a plain text box (Lever's "Current location").
-    // Never press Enter here: in a plain input Enter submits the whole form,
-    // even with Submit off. Type the full answer and leave the field instead.
+  const listBox = await isListBox(input);
+  let opts = null;
+  let texts = [];
+  let pick = -1;
+  if (listBox) {
+    await input.press('ArrowDown').catch(() => {});
+    await sleep(500);
+    opts = await optionsFor(page, input);
+    texts = await optionTexts(opts);
+    pick = texts.length ? pickOption(texts, entry) : -1;
+  }
+  const query = String(entry.typeaheadAnswer || entry.answer);
+  if (pick < 0) {
+    await input.fill('').catch(() => {});
+    await input.pressSequentially(query, { delay: 30 }).catch(() => {});
+    await sleep(1500);
+    opts = await optionsFor(page, input);
+    texts = await optionTexts(opts);
+    if (!texts.length && query.includes(',')) {
+      await input.fill('').catch(() => {});
+      await input.pressSequentially(query.split(',')[0].trim(), { delay: 30 }).catch(() => {});
+      await sleep(1500);
+      opts = await optionsFor(page, input);
+      texts = await optionTexts(opts);
+    }
+    if (texts.length) {
+      pick = pickOption(texts, entry);
+      if (pick < 0 && entry.first) pick = 0;
+    }
+  }
+  if (pick >= 0) {
+    const opt = opts.nth(pick);
+    await opt.scrollIntoViewIfNeeded().catch(() => {});
+    await opt.click({ timeout: 4000 }).catch(() => opt.click({ force: true, timeout: 2000 }).catch(() => {}));
+    await sleep(400);
+    // only a choice the box now shows counts; a menu left open would cover the next field
+    if (String(await input.evaluate(CURRENT).catch(() => '')).trim()) {
+      if (await input.getAttribute('aria-expanded').catch(() => null) === 'true') await input.press('Escape').catch(() => {});
+      return true;
+    }
+  }
+  if (!listBox && !texts.length) {
+    // No suggestions, so this is a plain text box. Never press Enter here: in
+    // a plain input Enter submits the whole form, even with Submit off. Type
+    // the full answer and leave the field instead.
     if (String(entry.answer) !== query) await input.fill(String(entry.answer)).catch(() => {});
     await input.dispatchEvent('change').catch(() => {});
     await input.evaluate((el) => el.blur()).catch(() => {});
     return true;
   }
-  const texts = [];
-  for (let i = 0; i < Math.min(n, 25); i++) texts.push((await options.nth(i).innerText().catch(() => '')).trim());
-  const pick = pickOption(texts, entry);
-  if (pick < 0) {
-    if (entry.first) { await options.nth(0).click().catch(() => {}); return true; }
-    await page.keyboard.press('Escape').catch(() => {});
-    return false;
-  }
-  await options.nth(pick).click().catch(() => {});
-  return true;
+  // a list with no matching choice: clear what was typed and close it
+  await input.fill('').catch(() => {});
+  await input.press('Escape').catch(() => {});
+  await input.evaluate((el) => el.blur()).catch(() => {});
+  return false;
 }
 
 /** The question text for a control: label[for], aria, wrapping label, field container, placeholder. */
@@ -111,44 +173,71 @@ export async function isRequired(control, label = '') {
 
 const TEXT_SEL = 'input[type="text"], input[type="email"], input[type="tel"], input[type="number"], input[type="url"], input:not([type]), textarea';
 
+// Boxes no person types into: search boxes, read only or disabled ones, and the
+// invisible helper input react-select puts beside each Greenhouse dropdown
+// (opacity 0, no pointer events), which can never be clicked.
+const UNTYPABLE = (el) => {
+  if (el.type === 'search' || el.readOnly || el.disabled || el.getAttribute('aria-hidden') === 'true') return true;
+  const s = getComputedStyle(el);
+  return s.pointerEvents === 'none' || (Number(s.opacity) === 0 && el.tabIndex < 0);
+};
+
+// what a box already holds; a react-select shows its choice beside an empty input
+const CURRENT = (el) => {
+  if (el.value) return el.value;
+  const box = el.closest('[class*="select__control" i], [class*="-control" i]');
+  const shown = box?.querySelector('[class*="single-value" i], [class*="singleValue" i], [class*="multi-value" i], [class*="multiValue" i]');
+  return shown ? shown.textContent : '';
+};
+
 export async function fillText(page, root, bank, unknowns, opts = {}) {
-  const { overwriteBadCity = false } = opts;
   const inputs = root.locator(TEXT_SEL);
   const n = await inputs.count();
   for (let i = 0; i < n; i++) {
     const inp = inputs.nth(i);
     if (!await inp.isVisible().catch(() => false)) continue;
-    if (await inp.evaluate((el) => el.type === 'search' || el.readOnly || el.disabled).catch(() => true)) continue;
-    const existing = (await inp.inputValue().catch(() => '')).trim();
-    const label = await labelFor(inp);
-    // some sites prefill "City" with a region string their own validator rejects
-    const badCity = overwriteBadCity && existing && /\b(city|location)\b/i.test(label) && /bay area|metropolitan|greater /i.test(existing);
-    if (existing && !badCity) continue;
-    if (badCity) await inp.fill('').catch(() => {});
-    const required = await isRequired(inp, label);
-    const meta = await inp.evaluate((el) => ({ textarea: el.tagName === 'TEXTAREA', max: el.maxLength > 0 ? el.maxLength : 0 })).catch(() => ({}));
-    // open-ended questions (and longer questions in a big text box) never get a
-    // profile fact like your phone or school; only your own saved answers
-    const essay = isEssayQuestion(label, meta);
-    const entry = matchAnswer(bank, label, { essay });
-    if (!entry) {
-      // open-ended question: let AI draft it when that is switched on
-      if (opts.draft && label && essay) {
-        const text = await opts.draft(label, { maxChars: meta.max || 0 });
-        if (text) { await fillLongText(inp, text); opts.drafted?.push({ question: label, answer: text }); continue; }
-      }
-      if (label) unknowns.push({ question: label, options: [], required, essay });
-      continue;
+    if (await inp.evaluate(UNTYPABLE).catch(() => true)) continue;
+    let label = '';
+    try {
+      label = await labelFor(inp);
+      await fillOneText(page, inp, label, bank, unknowns, opts);
+    } catch {
+      // one stubborn field never stops the rest of the form; it is asked instead
+      await page.keyboard.press('Escape').catch(() => {});
+      if (label) unknowns.push({ question: label, options: [], required: await isRequired(inp, label), note: 'JobPilot could not fill this field' });
     }
-    if (entry.type === 'skip') continue;
-    const combo = await inp.evaluate((el) => el.getAttribute('role') === 'combobox' || el.getAttribute('aria-autocomplete') === 'list'
-      || !!el.closest('[class*="select__control" i], .select2-container')).catch(() => false);
-    if (combo || /\b(city|location)\b/i.test(label) && entry.typeaheadAnswer) {
-      const ok = await fillCombobox(page, inp, entry);
-      if (!ok) unknowns.push({ question: label, options: [], required, note: 'no matching suggestion' });
-    } else {
-      await typeLikeHuman(inp, entry.answer);
+  }
+}
+
+async function fillOneText(page, inp, label, bank, unknowns, opts) {
+  const { overwriteBadCity = false } = opts;
+  const existing = String(await inp.evaluate(CURRENT).catch(() => '')).trim();
+  // some sites prefill "City" with a region string their own validator rejects
+  const badCity = overwriteBadCity && existing && /\b(city|location)\b/i.test(label) && /bay area|metropolitan|greater /i.test(existing);
+  if (existing && !badCity) return;
+  if (badCity) await inp.fill('').catch(() => {});
+  const required = await isRequired(inp, label);
+  const meta = await inp.evaluate((el) => ({ textarea: el.tagName === 'TEXTAREA', max: el.maxLength > 0 ? el.maxLength : 0 })).catch(() => ({}));
+  // open-ended questions (and longer questions in a big text box) never get a
+  // profile fact like your phone or school; only your own saved answers
+  const essay = isEssayQuestion(label, meta);
+  const entry = matchAnswer(bank, label, { essay });
+  if (!entry) {
+    // open-ended question: let AI draft it when that is switched on
+    if (opts.draft && label && essay) {
+      const text = await opts.draft(label, { maxChars: meta.max || 0 });
+      if (text) { await fillLongText(inp, text); opts.drafted?.push({ question: label, answer: text }); return; }
     }
+    if (label) unknowns.push({ question: label, options: [], required, essay });
+    return;
+  }
+  if (entry.type === 'skip') return;
+  const combo = await isListBox(inp);
+  if (combo || /\b(city|location)\b/i.test(label) && entry.typeaheadAnswer) {
+    const ok = await fillCombobox(page, inp, entry);
+    if (!ok) unknowns.push({ question: label, options: [], required, note: 'no matching suggestion' });
+  } else {
+    await typeLikeHuman(inp, entry.answer);
   }
 }
 
@@ -347,7 +436,9 @@ export async function fillCheckboxes(root, bank, unknowns) {
     if (await cb.isChecked().catch(() => false)) continue;
     const label = await labelFor(cb);
     const required = await isRequired(cb, label);
-    const entry = matchAnswer(bank, label);
+    // "By checking this box, I consent to ..." is the same statement as "I consent to ..."
+    const statement = label.replace(/^\s*by (checking|clicking|ticking|selecting) (this|the) (check ?box|box)\s*,?\s*/i, '');
+    const entry = matchAnswer(bank, label) || (statement !== label ? matchAnswer(bank, statement) : null);
     if (!entry) { if (required) unknowns.push({ question: label, options: ['(checkbox)'], required }); continue; }
     if (entry.type === 'skip') continue;
     if (entry.type === 'check' || /^yes/i.test(entry.answer || '')) {
@@ -359,6 +450,63 @@ export async function fillCheckboxes(root, bank, unknowns) {
       // your profile says this statement is not true for you (for example "I am
       // authorized to work" with authorization set to No): never tick it, ask you
       unknowns.push({ question: label, options: ['(checkbox)'], required, note: `your profile answer is "${entry.answer}", so it was left unticked` });
+    }
+  }
+  await fillCheckboxGroups(root, bank, unknowns);
+}
+
+/**
+ * "Tick all that apply" groups: several boxes sharing one name under one
+ * question ("Which languages do you speak?"). The saved answer can name more
+ * than one choice ("English, Spanish"); a required group with no answer is
+ * asked instead of left blank.
+ */
+export async function fillCheckboxGroups(root, bank, unknowns) {
+  const groups = await root.locator('input[type="checkbox"][name]').evaluateAll((els) => {
+    const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+    const byName = new Map();
+    els.forEach((el, idx) => {
+      el.setAttribute('data-jp-box', String(idx));
+      if (!byName.has(el.name)) byName.set(el.name, []);
+      byName.get(el.name).push(el);
+    });
+    const optionOf = (el) => clean((el.id && document.querySelector(`label[for="${CSS.escape(el.id)}"]`)?.textContent) || el.closest('label')?.textContent || el.value);
+    const out = [];
+    for (const list of byName.values()) {
+      if (list.length < 2) continue;
+      const opts = list.map(optionOf);
+      // the smallest container around the whole group, and its question text
+      let box = list[0].parentElement;
+      while (box && !list.every((el) => box.contains(el))) box = box.parentElement;
+      let question = '';
+      for (let n = box, hops = 0; n && !question && hops < 4; n = n.parentElement, hops++) {
+        for (const l of n.querySelectorAll('legend, .application-label, [class*="label" i], label, h3, h4')) {
+          const t = clean(l.textContent);
+          if (t && /\p{L}{2}/u.test(t) && !list.some((el) => l.contains(el)) && !opts.includes(t)) { question = t; break; }
+        }
+      }
+      const required = /[*✱]/.test(question) || list.some((el) => el.required || el.getAttribute('aria-required') === 'true');
+      const shown = list.some((el) => el.offsetParent || el.getClientRects().length || el.closest('label')?.getClientRects().length);
+      out.push({ question, required, shown, opts, idx: list.map((el) => Number(el.getAttribute('data-jp-box'))), checked: list.some((el) => el.checked) });
+    }
+    return out;
+  }).catch(() => []);
+  for (const g of groups) {
+    if (!g.shown || g.checked || !g.question) continue;
+    const entry = matchAnswer(bank, g.question);
+    if (entry?.type === 'skip') continue;
+    const wanted = entry ? String(entry.answer || '').split(/\s*[,;\n]\s*/).filter(Boolean) : [];
+    const picks = [...new Set(wanted.map((w) => pickOption(g.opts, { answer: w, options: [] })).filter((i) => i >= 0))];
+    if (!picks.length) {
+      if (g.required) unknowns.push({ question: g.question, options: g.opts, required: true, note: 'tick all that apply; answer with one or more choices, separated by commas' });
+      continue;
+    }
+    for (const i of picks) {
+      const cb = root.locator(`input[data-jp-box="${g.idx[i]}"]`);
+      const id = await cb.getAttribute('id').catch(() => null);
+      const lab = id ? root.locator(`label[for="${id.replace(/["\\]/g, '\\$&')}"]`).first() : null;
+      if (lab && await lab.count()) await lab.click({ timeout: 3000 }).catch(() => cb.check({ force: true }).catch(() => {}));
+      else await cb.check({ force: true, timeout: 3000 }).catch(() => cb.click({ force: true }).catch(() => {}));
     }
   }
 }

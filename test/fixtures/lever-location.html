@@ -1,0 +1,44 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Lever location</title>
+<style>.dropdown-results > div { padding: 4px; cursor: pointer; }</style></head>
+<body>
+<!-- like Lever: "Current location" suggests places as you type, and a typed
+     place that was not picked from the list is wiped when you leave the box.
+     A hidden hcaptcha sits on the page and never counts as a check. -->
+<form id="application-form" action="/never-sent" method="post">
+  <ul>
+    <li class="application-question"><label><div class="application-label">Full name <span class="required">✱</span></div>
+      <div class="application-field"><input type="text" name="name" required></div></label></li>
+    <li class="application-question"><label><div class="application-label">Current location <span class="required">✱</span></div>
+      <div class="application-field"><input class="location-input" id="location-input" type="text" name="location" required>
+        <input id="selected-location" type="hidden" name="selectedLocation">
+        <div class="dropdown-container"><div class="dropdown-results"></div></div></div></label></li>
+  </ul>
+  <div class="h-captcha" style="height:0"><iframe title="Widget containing checkbox for hCaptcha security challenge" style="visibility:hidden" width="300" height="80"></iframe></div>
+  <button type="submit">Submit application</button>
+</form>
+<script>
+  window.__submits = 0;
+  document.getElementById('application-form').addEventListener('submit', (e) => { e.preventDefault(); window.__submits++; });
+  const PLACES = ['Austin, MN, USA', 'Austin, TX, USA', 'Austin, IN, USA'];
+  const input = document.getElementById('location-input');
+  const results = document.querySelector('.dropdown-results');
+  const chosen = document.getElementById('selected-location');
+  input.addEventListener('input', () => {
+    chosen.value = '';
+    const q = input.value.trim().toLowerCase();
+    results.innerHTML = '';
+    if (q.length < 2) return;
+    setTimeout(() => {
+      for (const p of PLACES.filter((x) => x.toLowerCase().startsWith(q))) {
+        const d = document.createElement('div');
+        d.className = 'dropdown-location'; d.textContent = p;
+        d.addEventListener('mousedown', (e) => e.preventDefault());
+        d.addEventListener('click', () => { input.value = p; chosen.value = JSON.stringify({ name: p }); results.innerHTML = ''; });
+        results.appendChild(d);
+      }
+    }, 200);
+  });
+  input.addEventListener('blur', () => setTimeout(() => { if (!chosen.value) input.value = ''; results.innerHTML = ''; }, 100));
+</script>
+</body></html>

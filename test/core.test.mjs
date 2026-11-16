@@ -436,3 +436,36 @@ test('resume file names match exactly', () => {
   assert.ok(!hasFileName('Old_Jane_Doe_Resume.pdf', 'Jane_Doe_Resume.pdf'));
   assert.ok(!hasFileName('Jane_Doe_Resume.docx', 'Jane_Doe_Resume.pdf'));
 });
+
+test('company form wording: city box, how you heard, US location, military status, office days', () => {
+  const ws = ensureWorkspace(fs.mkdtempSync(path.join(os.tmpdir(), 'jobpilot-words-')));
+  writeJson(ws.profile, { city: 'Austin', state: 'Texas', country: 'United States', howHeard: 'LinkedIn', openToOnsite: 'Yes', yearsExperience: '2',
+    skills: [{ name: 'AWS', years: 6 }] });
+  const bank = loadAnswerBank(ws);
+  const a = (q) => matchAnswer(bank, q)?.answer ?? null;
+  assert.equal(a('Location (City)*'), 'Austin, Texas', 'Greenhouse');
+  assert.equal(a('Please tell us how you heard about this opportunity. ✱'), 'LinkedIn', 'Lever');
+  assert.equal(a('Are you currently located in the US?*'), 'Yes');
+  assert.equal(a('What is your military status?*'), 'Decline to self-identify');
+  assert.equal(a('Are you willing to work from the office(s) listed on the job description?*'), 'Yes');
+  // "at least N years" is answered by comparing, never with the number
+  assert.equal(a('Do you have a minimum of 7 years of experience building software?'), 'No');
+  assert.equal(a('Do you have 1+ years of professional experience?'), 'Yes');
+  assert.equal(a('Do you have at least 5 years of experience with AWS?'), 'Yes', 'a named skill uses that skill\'s years');
+  assert.equal(a('Do you have at least 3 years of experience with Terraform?'), 'No', 'a skill you did not list is 0 years');
+  assert.equal(a('How many years of experience do you have?'), '2', 'a "how many" question still gets the number');
+  writeJson(ws.profile, { country: 'Canada' });
+  assert.equal(matchAnswer(loadAnswerBank(ws), 'Are you currently located in the US?')?.answer, 'No');
+  writeJson(ws.profile, {});
+  assert.equal(matchAnswer(loadAnswerBank(ws), 'Are you currently located in the US?'), null, 'no country, no guess');
+});
+
+test('choices written a little differently: schools, places, countries', () => {
+  const pick = (opts, answer) => pickOption(opts, { answer, options: [] });
+  assert.equal(pick(['Click Here', 'University of Texas at Austin Medical Branch', 'The University of Texas - Austin'], 'University of Texas at Austin'), 2);
+  assert.equal(pick(['Austin, MN, USA', 'Austin, TX, USA'], 'Austin, Texas'), 1, 'state names match their abbreviations');
+  assert.equal(pick(['United States Minor Outlying Islands +1', 'United States +1'], 'United States'), 1);
+  assert.equal(pick(['Rice University', 'Baylor University'], 'University of Texas at Austin'), -1, 'no close name, no pick');
+  assert.equal(pick(['Not applicable', 'No'], 'No'), 1, 'short answers stay strict');
+  assert.equal(pick(['Job Board - LinkedIn', 'LinkedIn'], 'LinkedIn'), 1);
+});

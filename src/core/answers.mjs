@@ -11,7 +11,7 @@
 // queue, you answer it once in the dashboard, and it is saved to answers.json.
 import fs from 'node:fs';
 import { readJson, writeJson } from './config.mjs';
-import { skillAnswer, isSkillQuestion } from './skills.mjs';
+import { skillAnswer, isSkillQuestion, skillInQuestion } from './skills.mjs';
 
 /** Lowercase words and numbers only. Letters in any language are kept, so a question in Chinese or Spanish still has words to match. */
 export function normalizeLabel(s) {
@@ -170,7 +170,7 @@ export function profileAnswers(profile = {}) {
   add('phone type', '\\bphone (device )?type\\b|\\btype of phone\\b', 'Mobile', { options: ['mobile', 'cell'], long: true });
   add('phone', '\\b(tele|cell)?phone\\b|^(mobile|cell)( number| no)?$|\\b(mobile|cell|contact) number\\b', p.phone,
     { long: '^(tele|cell)?phone\\b|\\b(tele|cell)?phone number\\b|\\b(mobile|cell|contact) number\\b' });
-  add('city', '^city$|^current city|\\bcity (and |or )?state\\b|^location$|\\bcurrent location\\b|\\bwhere are you (currently )?(located|based)\\b|^city of residence', city,
+  add('city', '^city$|^current city|^location( city)?$|^city location$|\\bcity (and |or )?state\\b|^location$|\\bcurrent location\\b|\\bwhere are you (currently )?(located|based)\\b|^city of residence', city,
     { typeaheadAnswer: p.city, first: true, long: '\\bcurrent (city|location)\\b|\\bwhere are you (currently )?(located|based|living)\\b|\\bcity (and |or )?state\\b|\\bcity of residence\\b' });
   add('state', '^state$|^state (or )?province|^province|^region$|\\bstate of residence\\b', p.state, { long: true });
   add('country', '^country', p.country);
@@ -200,6 +200,11 @@ export function profileAnswers(profile = {}) {
   add('years of experience', '\\byears of (professional |relevant |work |total )?experience\\b|\\bhow many years\\b', p.yearsExperience,
     { long: '\\byears of (professional |relevant |work |total )?experience\\b|\\bhow many years (of|have you)\\b' });
 
+  // "Are you currently located in the US?" follows the country (or US state) in your profile
+  const inUs = /^(us|u s a?|usa|united states( of america)?|america)$/i.test(normalizeLabel(p.country || ''))
+    || (!p.country && Object.prototype.hasOwnProperty.call(STATES, normalizeLabel(p.state || '')));
+  add('located in the US', '\\b(located|based|living|residing|reside|live) in the (us|u s|usa|united states)\\b|\\bus (based|resident)\\b',
+    inUs ? 'Yes' : p.country ? 'No' : '', { long: true });
   const auth = yn(p.workAuthorized);
   add('work authorization', '\\bauthori[sz]ed to work\\b|\\blegally (authori[sz]ed|eligible|able|permitted) to work\\b|\\bwork authori[sz]ation\\b|\\beligible to work\\b|\\bright to work\\b', auth, { long: true, fact: true });
   const spon = yn(p.needsSponsorship);
@@ -211,13 +216,14 @@ export function profileAnswers(profile = {}) {
   add('onsite', '\\bon ?site\\b|\\bin office\\b|\\bin person\\b|\\bhybrid\\b|\\bcommut|\\bdays (a|per) week in\\b', yn(p.openToOnsite), {
     long: '\\b(work|working|be|being|come|report|commute|able|available|willing|comfortable)\\b.{0,30}\\b(on ?site|in (the |our )?office|in person)\\b'
       + '|\\b(on ?site|in (the |our )?office|in person)\\b.{0,60}\\b(able|willing|comfortable|ok|okay)\\b'
+      + '|\\b(work|working|come|report)\\b.{0,15}\\bfrom (the |our )?offices?\\b'
       + '|\\bhybrid (role|position|schedule|work|model|arrangement)\\b|\\bwork(ing)? hybrid\\b|\\bcommut|\\bdays (a|per) week in\\b',
   });
   add('start date', '\\bstart date\\b|\\bwhen can you start\\b|\\bavailable to start\\b|\\bearliest (start|availability)\\b', p.startDate, { long: true });
   add('notice', '\\bnotice period\\b', p.noticePeriod, { long: true });
   add('salary', '\\bsalary\\b|\\bcompensation\\b|\\bpay (expectation|requirement)s?\\b|\\bdesired (pay|rate)\\b', p.salary, { long: true });
   add('pronouns', '\\bpronouns?\\b', p.pronouns, { long: true });
-  add('how heard', '^how did you hear\\b|\\bhow did you (hear|find out|learn) about\\b|\\bhow did you find (us|this)\\b|\\bwhere did you (hear|find|see|learn) (about )?(us|this|the)\\b|\\breferral source\\b|^source$', p.howHeard || 'LinkedIn', { long: true });
+  add('how heard', '^how did you hear\\b|\\bhow did you (hear|find out|learn) about\\b|\\bhow (did )?you (hear|heard|found|learned|learnt) (about|of)\\b|\\bhow did you find (us|this)\\b|\\bwhere did you (hear|find|see|learn) (about )?(us|this|the)\\b|\\breferral source\\b|^source$', p.howHeard || 'LinkedIn', { long: true });
 
   // voluntary self-identification: default to declining unless the user chose
   const eeo = (v) => v || DECLINE;
@@ -226,7 +232,7 @@ export function profileAnswers(profile = {}) {
   add('orientation', '\\bsexual orientation\\b', eeo(p.orientation), { long: true });
   add('hispanic', '\\bhispanic\\b|\\blatin[oax]\\b|\\blatinx\\b', eeo(p.hispanic), { long: true });
   add('race', '\\brace\\b|\\bethnicit|\\bethnic background\\b', eeo(p.race), { long: '^race\\b|\\b(your|which|what) race\\b|\\brace (or |and )?ethnicity\\b|\\bethnicit|\\bethnic background\\b' });
-  add('veteran', '\\bveteran', eeo(p.veteran), { long: true });
+  add('veteran', '\\bveteran|\\bmilitary (status|service)\\b|\\bprotected veteran', eeo(p.veteran), { long: true });
   add('disability', '\\bdisabilit', eeo(p.disability), { long: true });
   return out;
 }
@@ -299,6 +305,30 @@ const FIRST_PERSON = /^(i|i m|by (checking|clicking|ticking|selecting|submitting
 const NEGATION = /\b(not|never|no longer|don t|won t|can t|cannot|isn t|aren t|doesn t|didn t|haven t|wouldn t)\b/;
 const negatedStatement = (n) => FIRST_PERSON.test(n) && NEGATION.test(n);
 
+// "Do you have at least 5 years of experience ...?" is a Yes/No question about a
+// number, so it is answered by comparing, never with the number itself
+const THRESHOLD = /\b(?:at least|a minimum of|minimum of|minimum|min|more than|over)\s+(\d{1,2})\+?\s*(?:years?|yrs?)\b|\b(\d{1,2})\s*\+\s*(?:years?|yrs?)\b|\b(\d{1,2})\s+or more\s+(?:years?|yrs?)\b/i;
+const YES_NO_Q = /^\s*(do|does|have|has|are|is|did|will|can|would)\b/i;
+
+function thresholdAnswer(label, bank) {
+  const m = label.match(THRESHOLD);
+  if (!m || !YES_NO_Q.test(label)) return null;
+  const need = Number(m[1] || m[2] || m[3]);
+  const skill = skillInQuestion(label);
+  let have;
+  if (skill) {
+    const skills = bank.skills || [];
+    if (!skills.length) return null;
+    const mine = skills.find((x) => String(x.name).toLowerCase() === skill.toLowerCase());
+    have = mine ? Number(mine.years) : 0;
+  } else {
+    have = Number(bank.find((a) => a.source === 'profile' && a.q === 'years of experience')?.answer);
+  }
+  if (!Number.isFinite(have)) return null;
+  const yes = have >= need;
+  return { q: `${need}+ years${skill ? ` with ${skill}` : ''}`, answer: yes ? 'Yes' : 'No', options: yes ? OPT.Yes : OPT.No, source: 'skills' };
+}
+
 /**
  * The answer for a question, or null. opts.essay (an open-ended question or a
  * long text box): only your own answers.json entries and skills are used,
@@ -312,6 +342,8 @@ export function matchAnswer(bank, label, { essay = false } = {}) {
     if (a.type === 'check' && !tickCovers(a, n, bank)) continue;
     return a;
   }
+  const th = thresholdAnswer(String(label), bank);
+  if (th) return th;
   const sk = skillAnswer(String(label), bank.skills || []);
   if (sk) return sk;
   // a skill question with no skills in the profile is unknown, not "0 years"
@@ -349,11 +381,45 @@ export function pickOption(optionTexts, entry) {
   if (!ans) return -1;
   let i = normed.findIndex((t) => t === ans);
   if (i >= 0) return i;
-  // whole words only: "No" never picks "Not applicable"
-  i = normed.findIndex((t) => fits(t) && (startsWords(t, ans) || startsWords(ans, t)));
-  if (i >= 0) return i;
-  if (SHORT_ANSWER.test(ans) || ans.length < 4) return -1;
-  return normed.findIndex((t) => fits(t) && t.length > 2 && (hasWords(t, ans) || hasWords(ans, t)));
+  // short answers: whole words at the start only, so "No" never picks "Not applicable"
+  if (SHORT_ANSWER.test(ans) || ans.length < 4) return normed.findIndex((t) => fits(t) && (startsWords(t, ans) || startsWords(ans, t)));
+  return closestPick(normed, ans, fits);
+}
+
+const STATES = { alabama: 'al', alaska: 'ak', arizona: 'az', arkansas: 'ar', california: 'ca', colorado: 'co', connecticut: 'ct', delaware: 'de',
+  'district of columbia': 'dc', florida: 'fl', georgia: 'ga', hawaii: 'hi', idaho: 'id', illinois: 'il', indiana: 'in', iowa: 'ia', kansas: 'ks',
+  kentucky: 'ky', louisiana: 'la', maine: 'me', maryland: 'md', massachusetts: 'ma', michigan: 'mi', minnesota: 'mn', mississippi: 'ms',
+  missouri: 'mo', montana: 'mt', nebraska: 'ne', nevada: 'nv', 'new hampshire': 'nh', 'new jersey': 'nj', 'new mexico': 'nm', 'new york': 'ny',
+  'north carolina': 'nc', 'north dakota': 'nd', ohio: 'oh', oklahoma: 'ok', oregon: 'or', pennsylvania: 'pa', 'rhode island': 'ri',
+  'south carolina': 'sc', 'south dakota': 'sd', tennessee: 'tn', texas: 'tx', utah: 'ut', vermont: 'vt', virginia: 'va', washington: 'wa',
+  'west virginia': 'wv', wisconsin: 'wi', wyoming: 'wy' };
+const STATE_RE = new RegExp(`\\b(${Object.keys(STATES).sort((a, b) => b.length - a.length).join('|')})\\b`, 'g');
+const FILLER = new Set(['the', 'of', 'at', 'in', 'and', 'a', 'an', 'for', 'usa', 'us', 'united', 'states', 'america']);
+const words = (t) => new Set(t.replace(STATE_RE, (m) => STATES[m]).split(' ').filter((w) => w.length > 1 && !FILLER.has(w)));
+
+/**
+ * Last resort for names written a little differently: options that contain the
+ * answer (or sit inside it), or that hold every meaningful word of it, and of
+ * those the one with the fewest extra words. "University of Texas at Austin"
+ * finds "The University of Texas - Austin" before "University of Texas at
+ * Austin Medical Branch", and "Austin, Texas" finds "Austin, TX, USA" rather
+ * than "Austin, MN, USA". Matching by words needs two meaningful words, so a
+ * one word answer never matches a longer option that way.
+ */
+function closestPick(normed, ans, fits) {
+  const want = words(ans);
+  let best = -1;
+  let extra = Infinity;
+  normed.forEach((t, i) => {
+    if (!fits(t) || t.length <= 2) return;
+    const have = words(t);
+    const contains = hasWords(t, ans) || hasWords(ans, t);
+    const sameWords = want.size >= 2 && [...want].every((w) => have.has(w));
+    if (!contains && !sameWords) return;
+    const more = Math.abs(have.size - want.size);
+    if (more < extra) { best = i; extra = more; }
+  });
+  return best;
 }
 
 /** Saves an answer the user typed in the dashboard for a queued question. */

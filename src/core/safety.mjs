@@ -13,10 +13,35 @@ export async function pause(settings, factor = 1) {
   await sleep(jitter(a * 1000 * factor, b * 1000 * factor));
 }
 
+const CAPTCHA_SEL = 'iframe[src*="captcha" i], iframe[title*="captcha" i], iframe[src*="turnstile" i], '
+  + 'iframe[src*="challenge" i], iframe[src*="arkoselabs" i], iframe[src*="funcaptcha" i], .g-recaptcha, .h-captcha, '
+  + 'div[data-sitekey], #challenge-form, #challenge-stage';
+
+/**
+ * True when a "prove you're human" check is actually showing: a checkbox
+ * widget or a picture puzzle you would have to solve. Many forms (Greenhouse,
+ * Lever) carry an invisible reCAPTCHA or hCaptcha that only scores the visit
+ * in the background and shows a small "protected by reCAPTCHA" badge; that is
+ * not a check, so it doesn't count. When the site does pop up a puzzle, its
+ * frame becomes visible and this returns true.
+ */
 export async function detectCaptcha(page) {
-  const sel = 'iframe[src*="captcha" i], iframe[title*="captcha" i], iframe[src*="turnstile" i], '
-    + 'iframe[src*="challenge" i], iframe[src*="arkoselabs" i], .g-recaptcha, .h-captcha, div[data-sitekey], #challenge-form';
-  return page.locator(sel).first().isVisible({ timeout: 400 }).catch(() => false);
+  return page.evaluate((sel) => {
+    const passive = (el) => /[?&#]size=invisible\b/i.test(el.getAttribute('src') || '')
+      || el.getAttribute('data-size') === 'invisible' || !!el.closest('.grecaptcha-badge');
+    const shown = (el) => {
+      const r = el.getBoundingClientRect();
+      if (r.width < 40 || r.height < 40) return false;
+      // reCAPTCHA parks its hidden puzzle far above the page
+      if (r.bottom + window.scrollY < 0 || r.right + window.scrollX < 0) return false;
+      for (let e = el; e && e.nodeType === 1; e = e.parentElement) {
+        const s = getComputedStyle(e);
+        if (s.display === 'none' || s.visibility === 'hidden' || Number(s.opacity) === 0) return false;
+      }
+      return true;
+    };
+    return [...document.querySelectorAll(sel)].some((el) => !passive(el) && shown(el));
+  }, CAPTCHA_SEL).catch(() => false);
 }
 
 const WALL_URL = /checkpoint|authwall|uas\/login|\/login\b|\/signin\b|security-verification|\/challenge\/|cdn-cgi\/challenge/i;

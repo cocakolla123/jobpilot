@@ -1,0 +1,88 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Job Application for Software Engineer at Acme</title>
+<style>
+  body { font: 14px sans-serif; }
+  .field { position: relative; margin: 14px 0; padding-bottom: 4px; width: 420px; }
+  .select__control { position: relative; display: flex; align-items: center; min-height: 30px; border: 1px solid #888; padding: 0 6px; }
+  .select__input { width: 4px; border: 0; outline: 0; padding: 0; }
+  .select__menu { position: absolute; top: 34px; left: 0; right: 0; z-index: 10; max-height: 120px; overflow: auto; background: #fff; border: 1px solid #333; }
+  .select__option { padding: 4px 6px; }
+  /* react-select's helper for the browser's "required" check: never clickable */
+  .required-input { opacity: 0; pointer-events: none; position: absolute; bottom: 0; left: 0; width: 100%; }
+  .grecaptcha-badge { position: fixed; right: 0; bottom: 14px; width: 256px; height: 60px; }
+</style></head>
+<body>
+<!-- Like today's Greenhouse (job-boards.greenhouse.io): dropdowns are
+     react-select boxes (a tiny text input inside a control, a menu named
+     react-select-<id>-listbox, an invisible required helper input), the city
+     list only fills in as you type, and an invisible reCAPTCHA badge sits on
+     every page. -->
+<h1>Software Engineer</h1>
+<form id="application-form">
+  <div class="field"><label for="first_name">First Name<span>*</span></label><input id="first_name" type="text" aria-required="true"></div>
+  <div class="field"><label for="last_name">Last Name<span>*</span></label><input id="last_name" type="text" aria-required="true"></div>
+  <div class="field"><label for="email">Email<span>*</span></label><input id="email" type="text" aria-required="true"></div>
+  <div class="field" data-select="country" data-options="United Arab Emirates +971|United States Minor Outlying Islands +1|United States +1|United Kingdom +44"><label id="country-label">Country<span>*</span></label></div>
+  <div class="field"><label for="phone">Phone<span>*</span></label><input id="phone" type="tel" aria-required="true"></div>
+  <div class="field" data-select="candidate-location" data-async="Austin, Minnesota, United States|Austin, Texas, United States"><label id="candidate-location-label">Location (City)<span>*</span></label></div>
+  <div class="field"><label for="resume">Resume/CV</label><input id="resume" type="file"></div>
+  <div class="field" data-select="question_1" data-options="Yes|No"><label id="question_1-label">Are you legally authorized to work in the United States for our Company?<span>*</span></label></div>
+  <div class="field" data-select="question_2" data-options="Yes|No"><label id="question_2-label">Will you now or in the future require sponsorship for employment visa status?<span>*</span></label></div>
+  <div class="field" data-select="question_3" data-options="Yes|No"><label id="question_3-label">Are you currently located in the US?<span>*</span></label></div>
+  <div class="field" data-select="gender" data-options="Male|Female|I don't wish to answer"><label id="gender-label">Gender<span>*</span></label></div>
+  <div class="field" data-select="veteran_status" data-options="I am a veteran|I am not a veteran|I don't wish to answer"><label id="veteran_status-label">What is your military status?<span>*</span></label></div>
+  <div class="field"><input type="checkbox" id="consent" required><label for="consent">By checking this box, I consent to Acme collecting, storing, and processing my responses to the demographic data surveys above.<span>*</span></label></div>
+  <button type="submit">Submit application</button>
+</form>
+<div class="grecaptcha-badge"><iframe title="reCAPTCHA" src="about:blank#k=test&amp;size=invisible" width="256" height="60"></iframe></div>
+<script>
+  window.__picked = {};
+  document.getElementById('application-form').addEventListener('submit', (e) => e.preventDefault());
+  for (const field of document.querySelectorAll('[data-select]')) {
+    const id = field.dataset.select;
+    const fixed = field.dataset.options ? field.dataset.options.split('|') : null;
+    const later = field.dataset.async ? field.dataset.async.split('|') : [];
+    const control = document.createElement('div');
+    control.className = 'select__control';
+    control.innerHTML = `<div class="select__value-container"><div class="select__placeholder">Select...</div>
+      <div class="select__input-container"><input class="select__input" id="${id}" type="text" role="combobox" aria-autocomplete="list"
+      aria-expanded="false" aria-haspopup="true" aria-labelledby="${id}-label" aria-required="true" autocomplete="off"></div></div>`;
+    field.appendChild(control);
+    const helper = document.createElement('input');
+    helper.className = 'required-input'; helper.tabIndex = -1; helper.required = true; helper.setAttribute('aria-hidden', 'true');
+    field.appendChild(helper);
+    const input = control.querySelector('input');
+    let menu = null;
+    const close = () => { menu?.remove(); menu = null; input.removeAttribute('aria-controls'); input.setAttribute('aria-expanded', 'false'); };
+    const choose = (text) => {
+      const shown = control.querySelector('.select__placeholder, .select__single-value');
+      shown.className = 'select__single-value'; shown.textContent = text;
+      helper.value = text; window.__picked[id] = text; input.value = ''; close();
+    };
+    const open = () => {
+      const q = input.value.trim().toLowerCase();
+      const list = fixed ? fixed.filter((o) => o.toLowerCase().includes(q)) : (q.length >= 2 ? later.filter((o) => o.toLowerCase().startsWith(q)) : []);
+      if (!menu) {
+        menu = document.createElement('div');
+        menu.className = 'select__menu'; menu.id = `react-select-${id}-listbox`; menu.setAttribute('role', 'listbox');
+        // like react-select: pressing on the menu keeps focus in the input
+        menu.addEventListener('mousedown', (e) => e.preventDefault());
+        field.insertBefore(menu, helper); // beside the control, as react-select does
+        input.setAttribute('aria-controls', menu.id); input.setAttribute('aria-expanded', 'true');
+      }
+      menu.innerHTML = '';
+      if (!list.length) { menu.innerHTML = '<div class="select__menu-notice">No options</div>'; return; }
+      for (const o of list) {
+        const el = document.createElement('div');
+        el.className = 'select__option'; el.setAttribute('role', 'option'); el.textContent = o;
+        el.addEventListener('click', () => choose(o));
+        menu.appendChild(el);
+      }
+    };
+    control.addEventListener('mousedown', (e) => { if (e.target !== input) e.preventDefault(); input.focus(); open(); });
+    input.addEventListener('input', open);
+    input.addEventListener('keydown', (e) => { if (e.key === 'ArrowDown') open(); if (e.key === 'Escape') close(); });
+    input.addEventListener('blur', () => { input.value = ''; close(); });
+  }
+</script>
+</body></html>

@@ -2377,7 +2377,7 @@ function applyHow(j) {
 }
 const APPLY_TIP = {
   easy: 'Applied right on the site', quick: 'Handshake Quick Apply',
-  external: 'JobPilot fills Lever, Ashby and Greenhouse forms. Other company sites are left for you.',
+  external: 'JobPilot fills Lever, Ashby and Greenhouse forms, also when a company careers page holds one. Other company sites are left for you.',
   ats: 'A Lever, Ashby or Greenhouse form that JobPilot can fill',
 };
 

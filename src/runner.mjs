@@ -386,14 +386,20 @@ export class Runner extends EventEmitter {
             }
             url = url ? ats.unwrapRedirect(url) : null;
             if (url) updateJob(ws, key, { externalUrl: url });
-            if (!url || !ats.detectAts(url)) {
-              res = { status: 'external_manual', note: url ? 'apply on the company site (link saved)' : 'could not read the external link' };
+            if (!url) {
+              res = { status: 'external_manual', note: 'could not read the external link' };
             } else if (!sources.includes('ats')) {
               res = { status: 'saved', note: 'company form; run with company forms on' };
             } else if (submittedToday(rows, 'ats') >= settings.dailyCaps.ats) {
               res = { status: 'saved', note: 'daily cap for company forms reached' };
             } else {
-              res = await ats.apply(tab, { ...job, url }, ctx);
+              // the link may be a company careers page that holds the form, or a redirect to it
+              const form = await ats.resolveAts(tab, url);
+              if (!form) res = { status: 'external_manual', note: 'apply on the company site (link saved)' };
+              else {
+                if (form !== url) updateJob(ws, key, { formUrl: form });
+                res = await ats.apply(tab, { ...job, url: form }, ctx);
+              }
             }
           } else {
             if (job.source === 'indeed') {

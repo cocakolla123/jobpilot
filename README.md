@@ -5,7 +5,7 @@ JobPilot searches LinkedIn, Handshake and Indeed for you, saves the jobs it find
 * **LinkedIn** with Easy Apply
 * **Handshake** with Quick Apply
 * **Indeed** with Indeed Apply
-* **Company forms** on Lever, Ashby and Greenhouse
+* **Company forms** on Lever, Ashby and Greenhouse, including the ones a company's own careers page holds (like careers.airbnb.com, which shows a Greenhouse form)
 
 You run everything from a small dashboard on your own computer, and every application goes into a spreadsheet.
 
@@ -207,7 +207,7 @@ Add `--workspace <folder>` to any of them.
 
 * **Daily caps.** By default, at most 25 LinkedIn, 30 Handshake, 10 Indeed and 30 company form applications a day, counted from your sheet. LinkedIn limits Easy Apply accounts that go much past this. There's also a pause of 6 to 12 seconds between jobs.
 * **Site rules.** LinkedIn, Indeed and Handshake don't allow automated use in their terms. Accounts that apply at high volume can be limited or suspended. Keep the caps low, read what you send, and use this at your own risk.
-* **Security checks.** JobPilot stops instead of working around any captcha, login wall or security page.
+* **Security checks.** JobPilot stops instead of working around any captcha, login wall or security page. The small "protected by reCAPTCHA" badge many company forms carry is not a check, so those forms are filled; if a site pops up a puzzle, JobPilot stops there and leaves the tab for you.
 * **Privacy.** Everything stays on your computer. The dashboard only answers on 127.0.0.1 and refuses requests from other websites. The only data that leaves your computer is what you send to job sites and, if AI answers are on, the question, posting and resume text sent to Claude.
 
 ## Tests

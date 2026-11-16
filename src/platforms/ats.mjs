@@ -9,11 +9,53 @@ export const label = 'Company forms (Lever, Ashby, Greenhouse)';
 
 export function detectAts(url) {
   let h;
-  try { h = new URL(url).hostname.toLowerCase(); } catch { return null; }
-  if (h.endsWith('ashbyhq.com')) return 'ashby';
-  if (h.endsWith('greenhouse.io') && h !== 'app.greenhouse.io') return 'greenhouse';
-  if (h.endsWith('lever.co')) return 'lever';
+  let p;
+  try { ({ hostname: h, pathname: p } = new URL(url)); h = h.toLowerCase(); } catch { return null; }
+  if (h.endsWith('ashbyhq.com') && !h.startsWith('api.') && !/\/embed\/?$/.test(p)) return 'ashby';
+  // app/my are Greenhouse's own sign in and candidate pages, not a job form
+  if (h.endsWith('greenhouse.io') && !/^(app|my|api|boards-api)\./.test(h)) return 'greenhouse';
+  if (h.endsWith('lever.co') && !h.startsWith('api.')) return 'lever';
   return null;
+}
+
+/**
+ * The Lever, Ashby or Greenhouse form behind a link, or null. The link itself
+ * when it is one; otherwise it is opened in `page` and followed: a redirect
+ * (Indeed and LinkedIn wrap links), the form a company careers page embeds
+ * (careers.airbnb.com/positions/123?gh_jid=123 holds a Greenhouse form in a
+ * frame), or the page's own Apply link to one of them.
+ */
+export async function resolveAts(page, url) {
+  if (detectAts(url)) return url;
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+  } catch { return null; }
+  await sleep(3000);
+  if (detectAts(page.url())) return page.url();
+  const found = await page.evaluate(() => {
+    const ATS = /(^|\.)(greenhouse\.io|ashbyhq\.com|lever\.co)$/i;
+    const host = (u) => { try { return new URL(u, location.href).hostname; } catch { return ''; } };
+    return {
+      frames: [...document.querySelectorAll('iframe[src]')].map((f) => f.src).filter((u) => ATS.test(host(u))),
+      scripts: [...document.querySelectorAll('script[src]')].map((x) => x.src).filter((u) => ATS.test(host(u))),
+      links: [...document.querySelectorAll('a[href]')].filter((a) => ATS.test(host(a.href)) && /apply|application/i.test(`${a.textContent} ${a.href}`)).map((a) => a.href),
+      search: location.search,
+    };
+  }).catch(() => null);
+  if (!found) return null;
+  const q = new URLSearchParams(found.search);
+  // Greenhouse: the embedded form frame, or build it from the board the page loads
+  const ghFrame = found.frames.find((u) => /greenhouse\.io\/embed\/job_app\b/i.test(u));
+  if (ghFrame) return ghFrame;
+  const ghBoard = found.scripts.map((u) => { try { return new URL(u).searchParams.get('for'); } catch { return null; } }).find(Boolean);
+  if (ghBoard && /^\d+$/.test(q.get('gh_jid') || '')) return `https://job-boards.greenhouse.io/embed/job_app?for=${encodeURIComponent(ghBoard)}&token=${q.get('gh_jid')}`;
+  // Ashby: its embed names the company, and ashby_jid names the job
+  const ashbyOrg = [...found.frames, ...found.scripts].map((u) => { try { const x = new URL(u); return /ashbyhq\.com$/i.test(x.hostname) ? x.pathname.split('/').filter(Boolean)[0] : null; } catch { return null; } }).find(Boolean);
+  const ashbyJob = q.get('ashby_jid');
+  if (ashbyOrg && ashbyJob && /^[\w-]{8,}$/.test(ashbyJob)) return `https://jobs.ashbyhq.com/${encodeURIComponent(ashbyOrg)}/${ashbyJob}/application`;
+  const frame = found.frames.find((u) => detectAts(u));
+  if (frame) return frame;
+  return found.links.find((u) => detectAts(u)) || null;
 }
 
 /** Follows ?url= style redirect wrappers that job boards put around links. */
@@ -88,10 +130,15 @@ export async function apply(page, job, ctx) {
   await sleep(2500);
   if (await detectCaptcha(page)) return { status: 'blocked', note: `${ats}: a captcha is showing; finish this one yourself`, keepTab: true };
   const title = await titleOf(page, ats);
-  if (!title || /page not found|job not found|\b404\b|no longer (accepting|available)|position.*(closed|filled)/i.test(title)) {
+  const root = formRoot(page, ats);
+  // an embedded form has no heading, so a form with fields is never "closed"
+  const fields = await root.locator('input:not([type=hidden]), textarea, select').count().catch(() => 0);
+  // a closed Greenhouse job sends you to the company's board with ?error=true
+  const gone = /[?&]error=true\b/.test(page.url());
+  if (gone || /page not found|job not found|\b404\b|no longer (accepting|available)|position.*(closed|filled)/i.test(title) || (!title && !fields)) {
     return { status: 'error', note: `${ats}: the posting looks closed`, keepTab: false };
   }
-  const root = formRoot(page, ats);
+  if (!fields) return { status: 'error', note: `${ats}: no application form on this page; the tab is left open`, keepTab: true };
   const attached = await attachFiles(root, ctx.docs);
   // the file input holds exactly this file, so this is the resume that was sent
   const resumeUsed = attached.includes('resume') ? String(ctx.docs.resume).split(/[\\/]/).pop() : null;
